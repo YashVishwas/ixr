@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/pkg/bus"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -50,6 +53,16 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Model == "auto" {
+		hint := taskHintFromHeaders(r, &req)
+		resolved := routing.Route(hint)
+		if resolved == "" {
+			writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+			return
+		}
+		req.Model = resolved
+	}
+
 	p, err := h.router(req.Model)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "no_provider", err.Error())
@@ -92,6 +105,48 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("failed to write response", "err", err)
 	}
+}
+
+func promptCharsFromMessages(req *schema.RequestEnvelope) int {
+	if req == nil {
+		return 0
+	}
+	n := 0
+	for _, m := range req.Messages {
+		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.ID) + len(tc.Type) + len(tc.Function.Name) + len(tc.Function.Arguments)
+		}
+	}
+	return n
+}
+
+func taskHintFromHeaders(r *http.Request, req *schema.RequestEnvelope) routing.TaskHint {
+	hint := routing.TaskHint{
+		PromptChars: promptCharsFromMessages(req),
+	}
+	if r == nil {
+		return hint
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-IXR-Task"))) {
+	case "reasoning":
+		hint.ReasoningScore = 1
+	case "coding":
+		hint.CodingScore = 1
+	case "math":
+		hint.MathScore = 1
+	case "multilingual":
+		hint.MultilingualScore = 1
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-IXR-Budget")); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			hint.MaxCostUSDPer1M = f
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-IXR-Latency")), "sensitive") {
+		hint.LatencySensitive = true
+	}
+	return hint
 }
 
 // apiError matches the OpenAI error envelope so existing SDKs parse it correctly.

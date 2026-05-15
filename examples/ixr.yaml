@@ -8,3 +8,27 @@ providers:
     api_key: ${OPENAI_API_KEY}
   anthropic:
     api_key: ${ANTHROPIC_API_KEY}
+  # Google AI Studio (same key for Gemini + Gemma free-tier models).
+  gemini:
+    api_key: ${GOOGLE_API_KEY}
+  gemma:
+    api_key: ${GOOGLE_API_KEY}
+  # Groq free tier — Llama family (e.g. llama-3.1-8b-instant).
+  llama:
+    api_key: ${GROQ_API_KEY}
+  # DeepSeek (e.g. deepseek-chat).
+  deepseek:
+    api_key: ${DEEPSEEK_API_KEY}
+  # Free-tier providers aligned with https://github.com/tashfeenahmed/freellmapi
+  cerebras:
+    api_key: ${CEREBRAS_API_KEY}
+  mistral:
+    api_key: ${MISTRAL_API_KEY}
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}
+  sambanova:
+    api_key: ${SAMBANOVA_API_KEY}
+  github:
+    api_key: ${GITHUB_TOKEN}
+  zhipu:
+    api_key: ${ZHIPU_API_KEY}
