@@ -15,23 +15,30 @@ import (
 
 // Adapter calls an OpenAI-compatible /chat/completions endpoint.
 type Adapter struct {
-	name    string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	name         string
+	apiKey       string
+	baseURL      string
+	extraHeaders map[string]string
+	client       *http.Client
 }
 
 // New returns an adapter with the given logical provider name and default base URL
 // (e.g. https://api.deepseek.com/v1). Pass baseURL="" to use defaultBase.
 func New(name, apiKey, baseURL, defaultBase string) *Adapter {
+	return NewWithHeaders(name, apiKey, baseURL, defaultBase, nil)
+}
+
+// NewWithHeaders is like New but sends extra HTTP headers on each request (e.g. OpenRouter).
+func NewWithHeaders(name, apiKey, baseURL, defaultBase string, extraHeaders map[string]string) *Adapter {
 	if baseURL == "" {
 		baseURL = defaultBase
 	}
 	return &Adapter{
-		name:    name,
-		apiKey:  apiKey,
-		baseURL: baseURL,
-		client:  &http.Client{},
+		name:         name,
+		apiKey:       apiKey,
+		baseURL:      baseURL,
+		extraHeaders: extraHeaders,
+		client:       &http.Client{},
 	}
 }
 
@@ -51,6 +58,9 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+	for k, v := range a.extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
 
 	httpResp, err := a.client.Do(httpReq)
 	if err != nil {

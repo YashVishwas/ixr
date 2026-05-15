@@ -22,10 +22,16 @@ import (
 	cfgloader "github.com/YashVishwas/ixr/internal/adapters/config"
 	"github.com/YashVishwas/ixr/internal/adapters/pluginmgr"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/anthropic"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/cerebras"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/deepseek"
+	githubmodels "github.com/YashVishwas/ixr/internal/adapters/providers/githubmodels"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/googleai"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/llama"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/mistral"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openai"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/openrouter"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/sambanova"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/pkg/provider"
 )
@@ -65,6 +71,12 @@ func Start(opts ...Option) error {
 	router := ingress.Router(func(model string) (provider.Provider, error) {
 		m := strings.ToLower(model)
 		switch {
+		case strings.HasPrefix(m, "gpt-oss"):
+			p, ok := registry["cerebras"]
+			if !ok {
+				return nil, fmt.Errorf("cerebras provider not configured (use CEREBRAS_API_KEY or ixr.yaml providers.cerebras)")
+			}
+			return p, nil
 		case strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3"):
 			p, ok := registry["openai"]
 			if !ok {
@@ -87,6 +99,61 @@ func Start(opts ...Option) error {
 			p, ok := registry["gemini"]
 			if !ok {
 				return nil, fmt.Errorf("gemini provider not configured")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "openai/"):
+			p, ok := registry["github"]
+			if !ok {
+				return nil, fmt.Errorf("github provider not configured (use GITHUB_TOKEN or ixr.yaml providers.github)")
+			}
+			return p, nil
+		case strings.Contains(m, "/"):
+			p, ok := registry["openrouter"]
+			if !ok {
+				return nil, fmt.Errorf("openrouter provider not configured (use OPENROUTER_API_KEY or ixr.yaml providers.openrouter)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "mistral-") || strings.HasPrefix(m, "codestral") ||
+			strings.HasPrefix(m, "magistral") || strings.HasPrefix(m, "devstral"):
+			p, ok := registry["mistral"]
+			if !ok {
+				return nil, fmt.Errorf("mistral provider not configured (use MISTRAL_API_KEY or ixr.yaml providers.mistral)")
+			}
+			return p, nil
+		case m == "gemma-3-12b-it":
+			p, ok := registry["sambanova"]
+			if !ok {
+				return nil, fmt.Errorf("sambanova provider not configured (use SAMBANOVA_API_KEY or ixr.yaml providers.sambanova)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "meta-llama"):
+			p, ok := registry["sambanova"]
+			if !ok {
+				return nil, fmt.Errorf("sambanova provider not configured (use SAMBANOVA_API_KEY or ixr.yaml providers.sambanova)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "deepseek-v"):
+			p, ok := registry["sambanova"]
+			if !ok {
+				return nil, fmt.Errorf("sambanova provider not configured (use SAMBANOVA_API_KEY or ixr.yaml providers.sambanova)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "qwen3") || strings.HasPrefix(m, "qwen-3"):
+			p, ok := registry["cerebras"]
+			if !ok {
+				return nil, fmt.Errorf("cerebras provider not configured (use CEREBRAS_API_KEY or ixr.yaml providers.cerebras)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "llama-4-maverick"):
+			p, ok := registry["cerebras"]
+			if !ok {
+				return nil, fmt.Errorf("cerebras provider not configured (use CEREBRAS_API_KEY or ixr.yaml providers.cerebras)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "glm-"):
+			p, ok := registry["zhipu"]
+			if !ok {
+				return nil, fmt.Errorf("zhipu provider not configured (use ZHIPU_API_KEY or ixr.yaml providers.zhipu)")
 			}
 			return p, nil
 		case strings.Contains(m, "llama"):
@@ -172,6 +239,30 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 				if pc.APIKey != "" {
 					registry["deepseek"] = deepseek.New(pc.APIKey, pc.BaseURL)
 				}
+			case "cerebras":
+				if pc.APIKey != "" {
+					registry["cerebras"] = cerebras.New(pc.APIKey, pc.BaseURL)
+				}
+			case "mistral":
+				if pc.APIKey != "" {
+					registry["mistral"] = mistral.New(pc.APIKey, pc.BaseURL)
+				}
+			case "openrouter":
+				if pc.APIKey != "" {
+					registry["openrouter"] = openrouter.New(pc.APIKey, pc.BaseURL)
+				}
+			case "sambanova":
+				if pc.APIKey != "" {
+					registry["sambanova"] = sambanova.New(pc.APIKey, pc.BaseURL)
+				}
+			case "github":
+				if pc.APIKey != "" {
+					registry["github"] = githubmodels.New(pc.APIKey, pc.BaseURL)
+				}
+			case "zhipu":
+				if pc.APIKey != "" {
+					registry["zhipu"] = zhipu.New(pc.APIKey, pc.BaseURL)
+				}
 			}
 		}
 	}
@@ -197,9 +288,27 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
 		registry["deepseek"] = deepseek.New(key, "")
 	}
+	if key := os.Getenv("CEREBRAS_API_KEY"); key != "" {
+		registry["cerebras"] = cerebras.New(key, "")
+	}
+	if key := os.Getenv("MISTRAL_API_KEY"); key != "" {
+		registry["mistral"] = mistral.New(key, "")
+	}
+	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		registry["openrouter"] = openrouter.New(key, "")
+	}
+	if key := os.Getenv("SAMBANOVA_API_KEY"); key != "" {
+		registry["sambanova"] = sambanova.New(key, "")
+	}
+	if key := os.Getenv("GITHUB_TOKEN"); key != "" {
+		registry["github"] = githubmodels.New(key, "")
+	}
+	if key := os.Getenv("ZHIPU_API_KEY"); key != "" {
+		registry["zhipu"] = zhipu.New(key, "")
+	}
 
 	if len(registry) == 0 {
-		return nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY) or provide ixr.yaml")
+		return nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
 	}
 
 	return registry, port, nil
