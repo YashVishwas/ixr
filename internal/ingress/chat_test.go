@@ -119,6 +119,51 @@ func TestChatHandler_HappyPath(t *testing.T) {
 	}
 }
 
+func TestChatHandler_ModelAutoResolvesCatalog(t *testing.T) {
+	var gotModel string
+	router := Router(func(model string) (provider.Provider, error) {
+		gotModel = model
+		return &stubProvider{
+			name: "openai",
+			resp: &schema.ResponseEnvelope{
+				ID:      "r-auto",
+				Model:   model,
+				Choices: []schema.Choice{{}},
+			},
+		}, nil
+	})
+	h := NewChatHandler(router, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-IXR-Task", "coding")
+	req.Header.Set("X-IXR-Latency", "sensitive")
+	req.Header.Set("X-IXR-Budget", "50")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if gotModel != "gpt-5.3-codex" {
+		t.Fatalf("prefix router model: got %q, want gpt-5.3-codex", gotModel)
+	}
+}
+
+func TestChatHandler_ModelAutoNoMatch(t *testing.T) {
+	h := NewChatHandler(fixedRouter(&stubProvider{}), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"auto","messages":[]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-IXR-Budget", "0.0001")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
+
 func TestChatHandler_UseCaseHeader(t *testing.T) {
 	published := make(chan *schema.CallEvent, 1)
 	fakeBus := &captureBus{ch: published}
