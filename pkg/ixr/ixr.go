@@ -132,7 +132,7 @@ func Start(opts ...Option) error {
 				return nil, fmt.Errorf("sambanova provider not configured (use SAMBANOVA_API_KEY or ixr.yaml providers.sambanova)")
 			}
 			return p, nil
-		case strings.HasPrefix(m, "deepseek-v"):
+		case m == "deepseek-v3.2":
 			p, ok := registry["sambanova"]
 			if !ok {
 				return nil, fmt.Errorf("sambanova provider not configured (use SAMBANOVA_API_KEY or ixr.yaml providers.sambanova)")
