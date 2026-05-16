@@ -20,6 +20,7 @@ import (
 
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
 	cfgloader "github.com/YashVishwas/ixr/internal/adapters/config"
+	timesfmadapter "github.com/YashVishwas/ixr/internal/adapters/forecast/timesfm"
 	"github.com/YashVishwas/ixr/internal/adapters/pluginmgr"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/anthropic"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/cerebras"
@@ -32,6 +33,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openrouter"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/sambanova"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
+	"github.com/YashVishwas/ixr/internal/domain/usageforecast"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/pkg/provider"
 )
@@ -63,7 +65,7 @@ func Start(opts ...Option) error {
 		o(cfg)
 	}
 
-	registry, port, err := buildRegistry(cfg)
+	registry, port, forecastCfg, err := buildRegistry(cfg)
 	if err != nil {
 		return err
 	}
@@ -176,9 +178,13 @@ func Start(opts ...Option) error {
 	memBus := bus.NewMemory(0)
 	mgr := pluginmgr.New(memBus)
 	mgr.Register(&auditlog.Plugin{})
+	usageStore := usageforecast.NewMemoryStore()
+	memBus.Subscribe(usageforecast.NewRecorder(usageStore))
+	forecastService := usageforecast.NewService(usageStore, buildForecaster(forecastCfg))
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/chat/completions", ingress.NewChatHandler(router, memBus))
+	mux.Handle("GET /v1/usage/forecast", ingress.NewUsageForecastHandler(forecastService))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -189,7 +195,7 @@ func Start(opts ...Option) error {
 }
 
 // buildRegistry constructs the provider map and effective port from config file or env vars.
-func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
+func buildRegistry(cfg *config) (map[string]provider.Provider, int, cfgloader.ForecastConfig, error) {
 	// Try config file first: explicit path → auto-discover → fall back to env.
 	var fileCfg *cfgloader.Config
 	var err error
@@ -197,22 +203,24 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	if cfg.configFile != "" {
 		fileCfg, err = cfgloader.Load(cfg.configFile)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, cfgloader.ForecastConfig{}, err
 		}
 	} else {
 		fileCfg, err = cfgloader.Discover()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, cfgloader.ForecastConfig{}, err
 		}
 	}
 
 	registry := map[string]provider.Provider{}
 	port := cfg.port
+	forecastCfg := cfgloader.ForecastConfig{}
 
 	if fileCfg != nil {
 		if fileCfg.Server.Port != 0 && cfg.port == 7000 {
 			port = fileCfg.Server.Port
 		}
+		forecastCfg = fileCfg.Forecast
 		for name, pc := range fileCfg.Providers {
 			switch name {
 			case "openai":
@@ -308,8 +316,23 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	}
 
 	if len(registry) == 0 {
-		return nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
+		return nil, 0, cfgloader.ForecastConfig{}, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
 	}
 
-	return registry, port, nil
+	if envURL := os.Getenv("IXR_TIMESFM_URL"); envURL != "" {
+		forecastCfg.TimesFMURL = envURL
+	}
+
+	return registry, port, forecastCfg, nil
+}
+
+func buildForecaster(cfg cfgloader.ForecastConfig) usageforecast.Forecaster {
+	fallback := usageforecast.MovingAverageForecaster{Lookback: 24}
+	if cfg.TimesFMURL == "" {
+		return fallback
+	}
+	return usageforecast.FallbackForecaster{
+		Primary:  timesfmadapter.NewHTTPForecaster(strings.TrimRight(cfg.TimesFMURL, "/")),
+		Fallback: fallback,
+	}
 }

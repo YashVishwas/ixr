@@ -3,6 +3,11 @@ server:
 
 log_level: info
 
+forecast:
+  # Optional TimesFM sidecar URL. If omitted, ixr uses a local moving-average
+  # fallback for token forecasts.
+  timesfm_url: ${IXR_TIMESFM_URL}
+
 providers:
   openai:
     api_key: ${OPENAI_API_KEY}

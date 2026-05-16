@@ -28,6 +28,8 @@ providers:
     api_key: sk-test
   anthropic:
     api_key: sk-ant-test
+forecast:
+  timesfm_url: http://localhost:8088
 `)
 
 	cfg, err := Load(path)
@@ -39,6 +41,9 @@ providers:
 	}
 	if cfg.Providers["openai"].APIKey != "sk-test" {
 		t.Errorf("openai api_key: got %q", cfg.Providers["openai"].APIKey)
+	}
+	if cfg.Forecast.TimesFMURL != "http://localhost:8088" {
+		t.Errorf("timesfm_url: got %q", cfg.Forecast.TimesFMURL)
 	}
 }
 

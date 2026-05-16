@@ -81,6 +81,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Latency:   latency,
 			Request:   req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+			UserID:    r.Header.Get("X-IXR-User"),
 		}
 		if err != nil {
 			ev.Error = err.Error()

@@ -9,7 +9,8 @@ import "time"
 type CallEvent struct {
 	ID        string           `json:"id"`
 	Timestamp time.Time        `json:"timestamp"`
-	UseCaseID string           `json:"use_case_id"` // from X-IXR-UseCase header
+	UseCaseID string           `json:"use_case_id"`       // from X-IXR-UseCase header
+	UserID    string           `json:"user_id,omitempty"` // from X-IXR-User header
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
 	Latency   time.Duration    `json:"latency_ms"`

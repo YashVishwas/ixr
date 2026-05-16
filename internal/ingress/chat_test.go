@@ -178,12 +178,16 @@ func TestChatHandler_UseCaseHeader(t *testing.T) {
 		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[]}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-IXR-UseCase", "test-case-42")
+	req.Header.Set("X-IXR-User", "user-42")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	ev := <-published
 	if ev.UseCaseID != "test-case-42" {
 		t.Errorf("use_case_id: got %q, want test-case-42", ev.UseCaseID)
+	}
+	if ev.UserID != "user-42" {
+		t.Errorf("user_id: got %q, want user-42", ev.UserID)
 	}
 }
 
