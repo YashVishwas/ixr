@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 
@@ -181,15 +183,19 @@ func Start(opts ...Option) error {
 	usageStore := usageforecast.NewMemoryStore()
 	memBus.Subscribe(usageforecast.NewRecorder(usageStore))
 	forecastService := usageforecast.NewService(usageStore, buildForecaster(forecastCfg))
+	forecastJobs := usageforecast.NewJobOrchestrator(forecastService, usageforecast.NewMemoryJobStore(), 128)
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/chat/completions", ingress.NewChatHandler(router, memBus))
 	mux.Handle("GET /v1/usage/forecast", ingress.NewUsageForecastHandler(forecastService))
+	mux.Handle("POST /v1/usage/forecast/jobs", ingress.NewUsageForecastJobHandler(forecastJobs))
+	mux.Handle("GET /v1/usage/forecast/jobs/{id}", ingress.NewUsageForecastJobHandler(forecastJobs))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go memBus.Start(ctx)
+	forecastJobs.Start(ctx, 1)
 
 	return ingress.NewServer(port, mux).Run(ctx)
 }
@@ -322,6 +328,11 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, cfgloader.Fo
 	if envURL := os.Getenv("IXR_TIMESFM_URL"); envURL != "" {
 		forecastCfg.TimesFMURL = envURL
 	}
+	if envTimeout := os.Getenv("IXR_TIMESFM_TIMEOUT_MS"); envTimeout != "" {
+		if ms, err := strconv.Atoi(envTimeout); err == nil {
+			forecastCfg.TimeoutMS = ms
+		}
+	}
 
 	return registry, port, forecastCfg, nil
 }
@@ -331,8 +342,9 @@ func buildForecaster(cfg cfgloader.ForecastConfig) usageforecast.Forecaster {
 	if cfg.TimesFMURL == "" {
 		return fallback
 	}
+	timeout := time.Duration(cfg.TimeoutMS) * time.Millisecond
 	return usageforecast.FallbackForecaster{
-		Primary:  timesfmadapter.NewHTTPForecaster(strings.TrimRight(cfg.TimesFMURL, "/")),
+		Primary:  timesfmadapter.NewHTTPForecaster(strings.TrimRight(cfg.TimesFMURL, "/"), timeout),
 		Fallback: fallback,
 	}
 }

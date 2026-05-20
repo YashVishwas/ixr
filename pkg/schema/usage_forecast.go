@@ -34,3 +34,34 @@ type TokenForecastResponse struct {
 	ProjectedOverLimit       bool              `json:"projected_over_limit"`
 	Forecast                 []TokenUsagePoint `json:"forecast"`
 }
+
+// ForecastJobStatus is the lifecycle state for an asynchronous forecast job.
+type ForecastJobStatus string
+
+const (
+	ForecastJobQueued    ForecastJobStatus = "queued"
+	ForecastJobRunning   ForecastJobStatus = "running"
+	ForecastJobSucceeded ForecastJobStatus = "succeeded"
+	ForecastJobFailed    ForecastJobStatus = "failed"
+)
+
+// TokenForecastJob is the persisted state of an asynchronous forecast request.
+type TokenForecastJob struct {
+	ID        string                 `json:"id"`
+	Status    ForecastJobStatus      `json:"status"`
+	Request   TokenForecastJobParams `json:"request"`
+	Result    *TokenForecastResponse `json:"result,omitempty"`
+	Error     string                 `json:"error,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
+
+// TokenForecastJobParams is the JSON-friendly form of TokenForecastRequest.
+type TokenForecastJobParams struct {
+	UserID         string  `json:"user_id"`
+	Model          string  `json:"model,omitempty"`
+	WindowHours    float64 `json:"window_hours,omitempty"`
+	HorizonHours   float64 `json:"horizon_hours,omitempty"`
+	BucketMinutes  float64 `json:"bucket_minutes,omitempty"`
+	FreeTokenLimit int     `json:"free_token_limit,omitempty"`
+}

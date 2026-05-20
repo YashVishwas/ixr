@@ -53,6 +53,62 @@ func (h *UsageForecastHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// UsageForecastJobHandler handles asynchronous forecast jobs for the spike path.
+type UsageForecastJobHandler struct {
+	orchestrator *usageforecast.JobOrchestrator
+}
+
+// NewUsageForecastJobHandler creates an async usage forecasting endpoint.
+func NewUsageForecastJobHandler(orchestrator *usageforecast.JobOrchestrator) *UsageForecastJobHandler {
+	return &UsageForecastJobHandler{orchestrator: orchestrator}
+}
+
+func (h *UsageForecastJobHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.create(w, r)
+	case http.MethodGet:
+		h.get(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "only GET and POST are supported")
+	}
+}
+
+func (h *UsageForecastJobHandler) create(w http.ResponseWriter, r *http.Request) {
+	var params schema.TokenForecastJobParams
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_body", "could not parse request JSON")
+		return
+	}
+	if params.UserID == "" {
+		params.UserID = strings.TrimSpace(r.Header.Get("X-IXR-User"))
+	}
+	job, err := h.orchestrator.Enqueue(r.Context(), params)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "forecast_job_enqueue_failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(job)
+}
+
+func (h *UsageForecastJobHandler) get(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/v1/usage/forecast/jobs/")
+	id = strings.TrimSpace(id)
+	if id == "" || id == r.URL.Path {
+		writeError(w, http.StatusBadRequest, "missing_job_id", "forecast job id is required")
+		return
+	}
+	job, err := h.orchestrator.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "forecast_job_not_found", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(job)
+}
+
 func durationFromHours(raw string, fallback time.Duration) time.Duration {
 	if raw == "" {
 		return fallback

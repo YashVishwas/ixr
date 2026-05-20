@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package ixr.forecast.v1;
+
+option go_package = "github.com/YashVishwas/ixr/gen/forecast/v1;forecastv1";
+
+service ForecastService {
+  rpc Forecast(ForecastRequest) returns (ForecastResponse);
+}
+
+message ForecastRequest {
+  int32 horizon = 1;
+  repeated Series inputs = 2;
+}
+
+message Series {
+  repeated double values = 1;
+}
+
+message ForecastResponse {
+  repeated Series point_forecast = 1;
+  double latency_ms = 2;
+  string backend = 3;
+}

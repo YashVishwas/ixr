@@ -86,6 +86,18 @@ your service
 
 see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered model.
 
+## usage forecasting
+
+Set `X-IXR-User` on chat requests and ixr can forecast token consumption:
+
+```http
+GET /v1/usage/forecast?user_id=user-123&free_token_limit=100000
+```
+
+For the TimesFM spike, ixr can also enqueue asynchronous forecast jobs and call
+a standalone Python forecasting service while retaining a native Go fallback.
+See [docs/USAGE_FORECASTING.md](docs/USAGE_FORECASTING.md).
+
 ## writing your first plugin
 
 ```go

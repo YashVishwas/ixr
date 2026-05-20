@@ -12,21 +12,24 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/usageforecast"
 )
 
-// HTTPForecaster calls a TimesFM sidecar over HTTP.
+// HTTPForecaster calls a remote TimesFM forecasting service over HTTP.
 //
-// Expected sidecar contract:
-// POST /forecast {"horizon": 24, "inputs": [[1, 2, 3]]}
-// -> {"point_forecast": [[4, 5, 6]]}
+// Expected service contract:
+// POST /v1/forecast {"horizon": 24, "inputs": [[1, 2, 3]]}
+// -> {"point_forecast": [[4, 5, 6]], "latency_ms": 12}
 type HTTPForecaster struct {
 	baseURL string
 	client  *http.Client
 }
 
 // NewHTTPForecaster creates a TimesFM HTTP adapter.
-func NewHTTPForecaster(baseURL string) *HTTPForecaster {
+func NewHTTPForecaster(baseURL string, timeout time.Duration) *HTTPForecaster {
+	if timeout <= 0 {
+		timeout = 20 * time.Millisecond
+	}
 	return &HTTPForecaster{
 		baseURL: baseURL,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 
@@ -37,9 +40,10 @@ type forecastRequest struct {
 
 type forecastResponse struct {
 	PointForecast [][]float64 `json:"point_forecast"`
+	LatencyMS     float64     `json:"latency_ms,omitempty"`
 }
 
-// Forecast sends the historical token buckets to a TimesFM sidecar.
+// Forecast sends the historical token buckets to a TimesFM service.
 func (f *HTTPForecaster) Forecast(ctx context.Context, history []usageforecast.Point, horizon int, bucket time.Duration) ([]usageforecast.ForecastPoint, error) {
 	if f == nil || f.baseURL == "" {
 		return nil, errors.New("timesfm base URL is required")
@@ -60,7 +64,7 @@ func (f *HTTPForecaster) Forecast(ctx context.Context, history []usageforecast.P
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+"/forecast", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, f.baseURL+"/v1/forecast", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

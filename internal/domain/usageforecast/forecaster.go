@@ -24,7 +24,7 @@ type Forecaster interface {
 	Forecast(ctx context.Context, history []Point, horizon int, bucket time.Duration) ([]ForecastPoint, error)
 }
 
-// MovingAverageForecaster is the local fallback when no TimesFM endpoint is configured.
+// MovingAverageForecaster is the local fallback when no TimesFM service is configured.
 type MovingAverageForecaster struct {
 	Lookback int
 }

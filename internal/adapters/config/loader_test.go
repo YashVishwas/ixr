@@ -30,6 +30,7 @@ providers:
     api_key: sk-ant-test
 forecast:
   timesfm_url: http://localhost:8088
+  timeout_ms: 20
 `)
 
 	cfg, err := Load(path)
@@ -44,6 +45,9 @@ forecast:
 	}
 	if cfg.Forecast.TimesFMURL != "http://localhost:8088" {
 		t.Errorf("timesfm_url: got %q", cfg.Forecast.TimesFMURL)
+	}
+	if cfg.Forecast.TimeoutMS != 20 {
+		t.Errorf("timeout_ms: got %d", cfg.Forecast.TimeoutMS)
 	}
 }
 

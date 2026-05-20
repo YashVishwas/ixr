@@ -23,4 +23,5 @@ type ProviderConfig struct {
 // ForecastConfig holds optional usage forecasting settings.
 type ForecastConfig struct {
 	TimesFMURL string `yaml:"timesfm_url,omitempty"`
+	TimeoutMS  int    `yaml:"timeout_ms,omitempty"`
 }
