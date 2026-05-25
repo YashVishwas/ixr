@@ -26,7 +26,7 @@ func TestAuthMiddlewareAllowsAPIKey(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h := authMiddleware(next, AuthConfig{APIKeys: map[string]string{"key-1": "secret"}})
+	h := authMiddleware(next, AuthConfig{APIKeys: map[string]APIKey{"key-1": {Secret: "secret"}}})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-IXR-API-Key", "secret")
@@ -61,7 +61,7 @@ func TestAuthMiddlewareAllowsBearer(t *testing.T) {
 func TestAuthMiddlewareRejectsMissingCredentials(t *testing.T) {
 	h := authMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("next should not be called")
-	}), AuthConfig{APIKeys: map[string]string{"key-1": "secret"}})
+	}), AuthConfig{APIKeys: map[string]APIKey{"key-1": {Secret: "secret"}}})
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
