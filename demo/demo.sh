@@ -26,11 +26,11 @@ red()   { printf '\033[1;31m%s\033[0m' "$*"; }
 cleanup() {
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     echo ""
-    echo "  Stopping ixr server (PID $SERVER_PID)…"
+    echo "  Stopping ixr server (PID $SERVER_PID)..."
     kill "$SERVER_PID" 2>/dev/null || true
   fi
   if [[ -d "$WORKTREE_BASE" ]]; then
-    echo "  Removing worktree $WORKTREE_BASE…"
+    echo "  Removing worktree $WORKTREE_BASE..."
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_BASE" 2>/dev/null || rm -rf "$WORKTREE_BASE"
   fi
 }
@@ -74,7 +74,7 @@ select_branch() {
   local i=1
   for b in "${branches[@]}"; do
     printf "    %2d)  %s\n" "$i" "$b"
-    ((i++))
+    i=$((i+1))
   done
   echo ""
   printf "  Enter number [default: phase-2_2]: "
@@ -113,7 +113,7 @@ setup_worktree() {
 # ── build ─────────────────────────────────────────────────────────────────────
 build_ixr() {
   echo ""
-  echo "  $(bold 'Building ixr…')"
+  echo "  $(bold 'Building ixr...')"
   (cd "$WORKTREE_BASE" && go build -o "$WORKTREE_BASE/ixr-bin" ./cmd/ixr/) 2>&1 | sed 's/^/    /'
   echo "  $(green 'Build complete.')"
 }
@@ -158,7 +158,7 @@ YAML
 # ── server start ──────────────────────────────────────────────────────────────
 start_server() {
   echo ""
-  echo "  $(bold "Starting ixr on port $PORT…")"
+  echo "  $(bold "Starting ixr on port ${PORT}...")"
   "$WORKTREE_BASE/ixr-bin" -config "$WORKTREE_BASE/demo-ixr.yaml" -port "$PORT" \
     > "$WORKTREE_BASE/ixr.log" 2>&1 &
   SERVER_PID=$!
@@ -179,7 +179,7 @@ start_server() {
   done
 
   if kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "  $(green "ixr running (PID $SERVER_PID) → http://localhost:$PORT")"
+    echo "  $(green "ixr running (PID ${SERVER_PID}) -> http://localhost:${PORT}")"
   fi
 }
 
@@ -206,7 +206,7 @@ start_server
 
 echo ""
 echo "  $(bold '─────────────────────────────────────────────')"
-echo "  $(bold '  Running demo scenarios…')"
+echo "  $(bold '  Running demo scenarios...')"
 echo "  $(bold '─────────────────────────────────────────────')"
 
 python3 "$DEMO_DIR/run_demo.py" --port "$PORT" --branch "$BRANCH"
