@@ -1,4 +1,8 @@
-.PHONY: build test vet lint clean check-deps
+.PHONY: build test vet lint clean check-deps dist
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS  := -trimpath -ldflags="-s -w -X main.version=$(VERSION)"
+DIST     := dist
 
 build:
 	go build ./...
@@ -19,6 +23,25 @@ check-deps:
 		echo "FAIL: internal/domain imports internal/adapters"; exit 1; \
 	fi
 	@echo "OK"
+
+# cross-compile binaries for all supported platforms into dist/
+dist:
+	@mkdir -p $(DIST)
+	@echo "Building $(VERSION) for all platforms..."
+	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-arm64       ./cmd/ixr
+	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-amd64       ./cmd/ixr
+	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-linux-amd64        ./cmd/ixr
+	GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-linux-arm64        ./cmd/ixr
+	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-windows-amd64.exe  ./cmd/ixr
+	@echo ""
+	@echo "Binaries written to $(DIST)/:"
+	@ls -lh $(DIST)/
+	@echo ""
+	@echo "Download the right file for your machine:"
+	@echo "  Mac (Apple Silicon / M1/M2/M3):  $(DIST)/ixr-darwin-arm64"
+	@echo "  Mac (Intel):                     $(DIST)/ixr-darwin-amd64"
+	@echo "  Linux:                           $(DIST)/ixr-linux-amd64"
+	@echo "  Windows:                         $(DIST)/ixr-windows-amd64.exe"
 
 clean:
 	rm -rf bin/ dist/ coverage.txt
