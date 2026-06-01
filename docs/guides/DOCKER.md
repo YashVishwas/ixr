@@ -176,8 +176,7 @@ The demo runs on your host against the container — no changes to the container
 
 ```bash
 # Get the demo script (demo_test branch)
-git clone --branch demo_test --depth 1 \
-  https://github.com/YashVishwas/ixr.git ixr-demo
+git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
 
 # Container must already be running (step 2 or 3)
 python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2

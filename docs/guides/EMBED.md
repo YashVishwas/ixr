@@ -256,8 +256,7 @@ With ixr embedded and running, run the demo script against it from another termi
 
 ```bash
 # Get the demo (demo_test branch)
-git clone --branch demo_test --depth 1 \
-  https://github.com/YashVishwas/ixr.git ixr-demo
+git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
 
 # Run demo against your embedded instance
 python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2

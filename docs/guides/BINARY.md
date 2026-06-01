@@ -192,8 +192,7 @@ The demo shows ixr's routing decisions, multi-provider comparison, and shadow te
 
 ```bash
 # Get the demo script (demo_test branch)
-git clone --branch demo_test --depth 1 \
-  https://github.com/YashVishwas/ixr.git ixr-demo
+git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
 
 # ixr must already be running (step 3 above)
 # Tell the demo script which port ixr is on
