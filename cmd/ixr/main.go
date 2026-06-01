@@ -10,7 +10,7 @@ import (
 
 func main() {
 	configFile := flag.String("config", "", "path to ixr.yaml (auto-discovered if not set)")
-	port := flag.Int("port", 0, "listen port (overrides config file; default 8080)")
+	port := flag.Int("port", 0, "listen port (overrides config file; default 7000)")
 	flag.Parse()
 
 	var opts []ixr.Option

@@ -25,10 +25,10 @@ func main() {
 }
 ```
 
-point your existing client at `http://localhost:8080` — nothing else changes:
+point your existing client at `http://localhost:7000` — nothing else changes:
 
 ```python
-client = OpenAI(base_url="http://localhost:8080")
+client = OpenAI(base_url="http://localhost:7000")
 ```
 
 **path 2: run as a binary**
@@ -46,7 +46,7 @@ OPENAI_API_KEY=sk-... ./ixr
 
 ```bash
 docker build -t ixr .
-docker run -p 8080:8080 -e OPENAI_API_KEY=sk-... ixr
+docker run -p 7000:7000 -e OPENAI_API_KEY=sk-... ixr
 ```
 
 **config (minimal)**
@@ -54,7 +54,7 @@ docker run -p 8080:8080 -e OPENAI_API_KEY=sk-... ixr
 ```yaml
 # ixr.yaml
 server:
-  port: 8080
+  port: 7000
 
 providers:
   openai:
@@ -68,7 +68,7 @@ providers:
 ```
 your service
     │
-    │  openai sdk (base_url=localhost:8080)
+    │  openai sdk (base_url=localhost:7000)
     ▼
 ┌─────────────────────────────────────────┐
 │                  ixr                    │
