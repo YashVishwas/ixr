@@ -85,9 +85,9 @@ FREE_PROVIDERS = [
 ]
 
 PAID_PROVIDERS = [
-    ("OPENAI_API_KEY",    "gpt-4o-mini",                "OpenAI (gpt-4o-mini)",            False),
-    ("ANTHROPIC_API_KEY", "claude-3-5-haiku-20241022",  "Anthropic (claude-3-5-haiku)",    False),
-    ("GOOGLE_API_KEY",    "gemini-1.5-flash",           "Gemini (gemini-1.5-flash)",        False),
+    ("OPENAI_API_KEY",    "gpt-4o-mini",       "OpenAI (gpt-4o-mini)",        False),
+    ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", "Anthropic (claude-sonnet-4-6)", False),
+    ("GOOGLE_API_KEY",    "gemini-1.5-flash",  "Gemini (gemini-1.5-flash)",   False),
 ]
 
 def detect_providers():
@@ -318,6 +318,37 @@ ALL_FEATURES = [
     ("redis_postgres_stores",   "Redis/Postgres store interfaces (circuit, perf, policy)"),
 ]
 
+def interactive_chat(port, model, label):
+    section("Interactive chat  (type 'quit' to exit)")
+    note(f"Your questions go through ixr -> {label}.")
+    note("Multi-turn context is NOT kept between questions (stateless proxy demo).")
+    print()
+    while True:
+        try:
+            question = input(f"  {cyan('Ask a question:')} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if question.lower() in ("quit", "exit", "q", ""):
+            break
+        resp, lat, err = chat(port, {
+            "model": model,
+            "messages": [{"role": "user", "content": question}],
+        })
+        if err:
+            print(f"  {red('Error:')} {err}")
+        elif resp:
+            choices = resp.get("choices", [])
+            content = choices[0]["message"]["content"] if choices else ""
+            model_used = resp.get("model", model)
+            usage = resp.get("usage", {})
+            t_in  = usage.get("prompt_tokens", "?")
+            t_out = usage.get("completion_tokens", "?")
+            print(f"  {green('Answer:')} {content}")
+            print(f"  {dim(f'[via ixr -> {model_used} | {lat*1000:.0f} ms | in:{t_in} out:{t_out}]')}")
+        print()
+
+
 def print_feature_summary(features):
     print()
     print(f"  {bold(cyan('Branch feature summary'))}")
@@ -391,6 +422,9 @@ def main():
         scenario_domain_overview()
 
     print_feature_summary(features)
+
+    # Interactive chat — enter after scenarios so the user can try it live
+    interactive_chat(args.port, primary_model, primary_label)
 
 
 if __name__ == "__main__":
