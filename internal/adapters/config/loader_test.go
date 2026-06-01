@@ -69,8 +69,8 @@ func TestLoad_DefaultPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Server.Port != 7000 {
-		t.Errorf("default port: got %d, want 7000", cfg.Server.Port)
+	if cfg.Server.Port != 8080 {
+		t.Errorf("default port: got %d, want 8080", cfg.Server.Port)
 	}
 }
 

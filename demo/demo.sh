@@ -11,7 +11,7 @@ set -euo pipefail
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 DEMO_DIR="$REPO_ROOT/demo"
-PORT=7001
+PORT=8081
 WORKTREE_BASE="/tmp/ixr-demo"
 SERVER_PID=""
 

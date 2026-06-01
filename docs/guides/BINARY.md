@@ -50,7 +50,7 @@ Create `ixr.yaml` in the same directory as the binary. You only need entries for
 ```yaml
 # ixr.yaml
 server:
-  port: 7000
+  port: 8080
 
 log_level: info
 
@@ -111,17 +111,17 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."
 You should see:
 
 ```
-2026/06/01 12:00:00 INFO ixr listening port=7000
+2026/06/01 12:00:00 INFO ixr listening port=8080
 ```
 
-ixr is now running at `http://localhost:7000`.
+ixr is now running at `http://localhost:8080`.
 
 ---
 
 ## 4. Verify it works
 
 ```bash
-curl http://localhost:7000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-4-6",
@@ -134,7 +134,7 @@ You should receive an OpenAI-shaped JSON response.
 **Quick auto-routing test** — ixr picks the model for you:
 
 ```bash
-curl http://localhost:7000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-IXR-Task: coding" \
   -H "X-IXR-Budget: 2.0" \
@@ -156,7 +156,7 @@ No code changes needed — just change the base URL:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:7000/v1",
+    base_url="http://localhost:8080/v1",
     api_key="not-checked",   # ixr uses its own provider keys
 )
 
@@ -173,7 +173,7 @@ print(response.choices[0].message.content)
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  baseURL: "http://localhost:7000/v1",
+  baseURL: "http://localhost:8080/v1",
   apiKey:  "not-checked",
 });
 
@@ -197,7 +197,7 @@ git clone --branch demo_test --depth 1 \
 
 # ixr must already be running (step 3 above)
 # Tell the demo script which port ixr is on
-python3 ixr-demo/demo/run_demo.py --port 7000 --branch phase-2_2
+python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2
 ```
 
 The demo detects which API keys you have set and adapts its scenarios automatically.
@@ -209,7 +209,7 @@ The demo detects which API keys you have set and adapts its scenarios automatica
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` | auto-discover | Path to `ixr.yaml` |
-| `--port` | `7000` | Override the listen port |
+| `--port` | `8080` | Override the listen port |
 
 Port in the `--port` flag takes precedence over the config file.
 
@@ -225,7 +225,7 @@ The model prefix doesn't match any configured provider. Check the [provider pref
 
 **Port already in use**
 ```bash
-./ixr-darwin-arm64 --config ixr.yaml --port 7001
+./ixr-darwin-arm64 --config ixr.yaml --port 8081
 ```
 
 **Mac — "cannot be opened because the developer cannot be verified"**

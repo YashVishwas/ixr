@@ -43,7 +43,7 @@ func main() {
 
 ```go
 func main() {
-    // ixr runs alongside your service on port 7000
+    // ixr runs alongside your service on port 8080
     go func() {
         if err := ixr.Start(); err != nil {
             slog.Error("ixr exited", "err", err)
@@ -70,7 +70,7 @@ ixr.Start(ixr.WithConfigFile("ixr.yaml"))
 ```go
 ixr.Start(
     ixr.WithConfigFile("ixr.yaml"),
-    ixr.WithPort(7001),
+    ixr.WithPort(8081),
 )
 ```
 
@@ -95,7 +95,7 @@ Create `ixr.yaml` alongside your binary. Add only the providers you have keys fo
 
 ```yaml
 server:
-  port: 7000
+  port: 8080
 
 log_level: warn   # info | warn | error
 
@@ -143,7 +143,7 @@ import (
 )
 
 func main() {
-    // Start ixr on port 7000 (reads ANTHROPIC_API_KEY etc from env)
+    // Start ixr on port 8080 (reads ANTHROPIC_API_KEY etc from env)
     go func() {
         if err := ixr.Start(ixr.WithConfigFile("ixr.yaml")); err != nil {
             slog.Error("ixr exited", "err", err)
@@ -154,7 +154,7 @@ func main() {
     // Your application server on port 8080
     http.HandleFunc("/ask", func(w http.ResponseWriter, r *http.Request) {
         // Call ixr just like you'd call OpenAI — base URL is the only change
-        fmt.Fprintln(w, "LLM calls go through ixr at http://localhost:7000")
+        fmt.Fprintln(w, "LLM calls go through ixr at http://localhost:8080")
     })
 
     slog.Info("app listening", "port", 8080)
@@ -181,7 +181,7 @@ No changes needed beyond the `base_url`. Works with any OpenAI-compatible SDK.
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:7000/v1",
+    base_url="http://localhost:8080/v1",
     api_key="not-checked",   # ixr manages provider keys
 )
 
@@ -229,7 +229,7 @@ func askIXR(question string) (string, error) {
     })
 
     resp, err := http.Post(
-        "http://localhost:7000/v1/chat/completions",
+        "http://localhost:8080/v1/chat/completions",
         "application/json",
         bytes.NewReader(body),
     )
@@ -260,7 +260,7 @@ git clone --branch demo_test --depth 1 \
   https://github.com/YashVishwas/ixr.git ixr-demo
 
 # Run demo against your embedded instance
-python3 ixr-demo/demo/run_demo.py --port 7000 --branch phase-2_2
+python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2
 ```
 
 The demo shows live routing decisions, multi-provider comparisons, shadow routing, and drops into interactive chat — all going through the ixr instance inside your process.
@@ -271,7 +271,7 @@ The demo shows live routing decisions, multi-provider comparisons, shadow routin
 
 | Option | Description |
 |--------|-------------|
-| `ixr.WithPort(n)` | Listen port (default: `7000`) |
+| `ixr.WithPort(n)` | Listen port (default: `8080`) |
 | `ixr.WithConfigFile(path)` | Load config from a specific path |
 
 ixr auto-discovers `ixr.yaml` if no `WithConfigFile` is provided.
@@ -296,7 +296,7 @@ No API keys were found at startup. Make sure at least one is exported before cal
 
 **Port conflict with your own server**
 ```go
-ixr.Start(ixr.WithPort(7001))
+ixr.Start(ixr.WithPort(8081))
 ```
 
 **ixr exits before my app is ready**

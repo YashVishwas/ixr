@@ -7,5 +7,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /ixr ./cmd/ixr
 
 FROM scratch
 COPY --from=builder /ixr /ixr
-EXPOSE 7000
+EXPOSE 8080
 ENTRYPOINT ["/ixr"]

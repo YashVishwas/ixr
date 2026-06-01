@@ -403,7 +403,7 @@ def interactive_chat(port, providers, has_shadow):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--port",   type=int, default=7001)
+    p.add_argument("--port",   type=int, default=8081)
     p.add_argument("--branch", default="phase-2_2")
     p.add_argument("--log",    default="")
     args = p.parse_args()

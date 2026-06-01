@@ -49,7 +49,7 @@ func Discover() (*Config, error) {
 
 func applyDefaults(c *Config) {
 	if c.Server.Port == 0 {
-		c.Server.Port = 7000
+		c.Server.Port = 8080
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"

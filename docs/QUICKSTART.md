@@ -55,10 +55,10 @@ export GROQ_API_KEY="gsk_..."
 
 ## How ixr routes requests
 
-Once running, ixr listens on `http://localhost:7000` (or your configured port) and accepts standard OpenAI-shaped requests:
+Once running, ixr listens on `http://localhost:8080` (or your configured port) and accepts standard OpenAI-shaped requests:
 
 ```bash
-curl http://localhost:7000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-sonnet-4-6",
@@ -69,7 +69,7 @@ curl http://localhost:7000/v1/chat/completions \
 You can also let ixr choose the model:
 
 ```bash
-curl http://localhost:7000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-IXR-Task: coding" \
   -H "X-IXR-Budget: 2.0" \
