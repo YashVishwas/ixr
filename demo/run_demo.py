@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-run_demo.py — ixr demo scenario runner.
+run_demo.py — ixr demo: shows what the router actually does, then lets you chat.
 
-Makes a series of HTTP calls against a running ixr proxy and prints the
-results with commentary explaining what each scenario demonstrates.
-
-Usage (called from demo.sh):
-    python3 run_demo.py --port 7001 --branch phase-2_2
+Usage (via demo.sh):
+    python3 run_demo.py --port 7001 --branch phase-2_2 [--log /tmp/ixr-demo/ixr.log]
 """
 
 import argparse
@@ -14,290 +11,278 @@ import json
 import os
 import sys
 import time
+import threading
 import urllib.error
 import urllib.request
 
-# ── ANSI helpers ──────────────────────────────────────────────────────────────
+# ── ANSI ──────────────────────────────────────────────────────────────────────
 
-def _c(code, text):
-    return f"\033[{code}m{text}\033[0m"
+def _c(code, t): return f"\033[{code}m{t}\033[0m"
+def bold(t):   return _c("1", t)
+def cyan(t):   return _c("1;36", t)
+def green(t):  return _c("1;32", t)
+def yellow(t): return _c("1;33", t)
+def red(t):    return _c("1;31", t)
+def dim(t):    return _c("2", t)
+def white(t):  return _c("1;37", t)
 
-def bold(t):    return _c("1", t)
-def cyan(t):    return _c("1;36", t)
-def green(t):   return _c("1;32", t)
-def yellow(t):  return _c("1;33", t)
-def red(t):     return _c("1;31", t)
-def dim(t):     return _c("2", t)
+# ── Branch features ───────────────────────────────────────────────────────────
 
-# ── Branch feature registry ───────────────────────────────────────────────────
-
-# What each branch has wired and available (cumulative).
 BRANCH_FEATURES = {
-    "main": {
-        "basic_routing",
-        "auto_routing",
-        "event_bus",
-    },
+    "main": {"basic_routing", "auto_routing", "event_bus"},
     "phase-2": {
-        "basic_routing",
-        "auto_routing",
-        "event_bus",
-        "circuit_breaker_domain",
-        "intent_parser",
-        "scoring_engine",
-        "rate_limit_domain",
-        "routing_filter_scorer",
+        "basic_routing", "auto_routing", "event_bus",
+        "circuit_breaker_domain", "intent_parser", "scoring_engine",
+        "rate_limit_domain", "routing_filter_scorer",
     },
     "phase-2_2": {
-        "basic_routing",
-        "auto_routing",
-        "event_bus",
-        "circuit_breaker_domain",
-        "intent_parser",
-        "scoring_engine",
-        "rate_limit_domain",
-        "routing_filter_scorer",
-        "shadow_routing",
-        "streaming_sse",
-        "telemetry_plugin",
-        "config_hot_reload",
-        "secrets_management",
-        "tenant_management",
-        "executor_retry_fallback",
-        "redis_postgres_stores",
+        "basic_routing", "auto_routing", "event_bus",
+        "circuit_breaker_domain", "intent_parser", "scoring_engine",
+        "rate_limit_domain", "routing_filter_scorer",
+        "shadow_routing", "streaming_sse", "telemetry_plugin",
+        "config_hot_reload", "secrets_management", "tenant_management",
+        "executor_retry_fallback", "redis_postgres_stores",
     },
 }
 
 def features_for(branch):
     b = branch.removeprefix("origin/").removeprefix("remotes/origin/")
-    # If exact match fails, fall back to main feature set
     return BRANCH_FEATURES.get(b, BRANCH_FEATURES.get("main", set()))
 
 # ── Provider detection ────────────────────────────────────────────────────────
 
-# (env_var, ixr_model_name, label, free_tier)
 FREE_PROVIDERS = [
-    ("CEREBRAS_API_KEY",  "qwen3-8b",                   "Cerebras (qwen3-8b)",             True),
-    ("GROQ_API_KEY",      "llama-3.1-8b-instant",       "Groq/Llama (llama-3.1-8b-instant)", True),
-    ("MISTRAL_API_KEY",   "mistral-small-latest",        "Mistral (mistral-small-latest)",  True),
-    ("SAMBANOVA_API_KEY", "Meta-Llama-3.1-8B-Instruct", "SambaNova (Meta-Llama-3.1-8B)",   True),
-    ("GITHUB_TOKEN",      "openai/gpt-4.1-mini",        "GitHub Models (gpt-4.1-mini)",    True),
+    ("CEREBRAS_API_KEY",  "qwen3-8b",                   "Cerebras",   "qwen3-8b",          True),
+    ("GROQ_API_KEY",      "llama-3.1-8b-instant",       "Groq/Llama", "llama-3.1-8b-instant", True),
+    ("MISTRAL_API_KEY",   "mistral-small-latest",        "Mistral",    "mistral-small",      True),
+    ("SAMBANOVA_API_KEY", "Meta-Llama-3.1-8B-Instruct", "SambaNova",  "Meta-Llama-3.1-8B", True),
+    ("GITHUB_TOKEN",      "openai/gpt-4.1-mini",        "GitHub",     "gpt-4.1-mini",       True),
 ]
-
 PAID_PROVIDERS = [
-    ("OPENAI_API_KEY",    "gpt-4o-mini",       "OpenAI (gpt-4o-mini)",        False),
-    ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", "Anthropic (claude-sonnet-4-6)", False),
-    ("GOOGLE_API_KEY",    "gemini-1.5-flash",  "Gemini (gemini-1.5-flash)",   False),
+    ("OPENAI_API_KEY",    "gpt-4o-mini",       "OpenAI",    "gpt-4o-mini",         False),
+    ("ANTHROPIC_API_KEY", "claude-sonnet-4-6", "Anthropic", "claude-sonnet-4-6",   False),
+    ("GOOGLE_API_KEY",    "gemini-1.5-flash",  "Gemini",    "gemini-1.5-flash",    False),
 ]
 
 def detect_providers():
-    available = []
+    out = []
     for entry in FREE_PROVIDERS + PAID_PROVIDERS:
-        env_var = entry[0]
-        if os.environ.get(env_var, "").strip():
-            available.append(entry)
-    return available
+        if os.environ.get(entry[0], "").strip():
+            out.append(entry)
+    return out  # (env_var, model, provider_name, model_short, free)
 
-# ── HTTP helper ───────────────────────────────────────────────────────────────
+# ── HTTP ──────────────────────────────────────────────────────────────────────
 
-def chat(port, payload, extra_headers=None, timeout=30):
-    """POST /v1/chat/completions. Returns (response_dict, latency_sec, error_str)."""
+def chat(port, payload, extra_headers=None, timeout=45):
+    """POST /v1/chat/completions. Returns (resp_dict, latency_sec, error_str)."""
     url = f"http://localhost:{port}/v1/chat/completions"
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=body, method="POST")
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), method="POST")
     req.add_header("Content-Type", "application/json")
     for k, v in (extra_headers or {}).items():
         req.add_header(k, v)
-
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            latency = time.monotonic() - t0
-            data = json.loads(resp.read())
-            return data, latency, None
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            lat = time.monotonic() - t0
+            return json.loads(r.read()), lat, None
     except urllib.error.HTTPError as e:
-        latency = time.monotonic() - t0
+        lat = time.monotonic() - t0
         try:
-            err_body = json.loads(e.read())
-            msg = err_body.get("error", {}).get("message", str(e))
+            msg = json.loads(e.read()).get("error", {}).get("message", str(e))
         except Exception:
             msg = str(e)
-        return None, latency, f"HTTP {e.code}: {msg}"
+        return None, lat, f"HTTP {e.code}: {msg}"
     except Exception as e:
-        latency = time.monotonic() - t0
-        return None, latency, str(e)
+        return None, time.monotonic() - t0, str(e)
 
-# ── Display helpers ───────────────────────────────────────────────────────────
+def chat_parallel(port, payloads_headers):
+    """Fire multiple chat calls in parallel. Returns list of (resp, lat, err)."""
+    results = [None] * len(payloads_headers)
+    def call(i, payload, headers):
+        results[i] = chat(port, payload, headers)
+    threads = []
+    for i, (payload, headers) in enumerate(payloads_headers):
+        t = threading.Thread(target=call, args=(i, payload, headers))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    return results
+
+# ── Display ───────────────────────────────────────────────────────────────────
+
+def hr(char="─", width=60):
+    print(f"  {dim(char * width)}")
 
 def section(title):
     print()
-    print(f"  {bold(cyan('▶  ' + title))}")
-    print(f"  {dim('─' * 56)}")
-
-def print_result(resp, latency, error):
-    if error:
-        print(f"  {red('✗')}  Error: {error}")
-        return
-    if not resp:
-        print(f"  {red('✗')}  No response received")
-        return
-
-    model   = resp.get("model", "?")
-    choices = resp.get("choices", [])
-    usage   = resp.get("usage", {})
-    content = choices[0]["message"]["content"] if choices else "(no content)"
-    t_in    = usage.get("prompt_tokens", "?")
-    t_out   = usage.get("completion_tokens", "?")
-
-    if len(content) > 200:
-        content = content[:200] + "…"
-
-    print(f"  {green('✓')}  Routed to: {bold(model)}")
-    print(f"       Latency: {latency*1000:.0f} ms  |  Tokens in: {t_in}  out: {t_out}")
-    print(f"       Response: {dim(content)}")
+    hr("─")
+    print(f"  {bold(cyan(title))}")
+    hr("─")
 
 def note(msg):
-    print(f"  {yellow('ℹ')}  {dim(msg)}")
+    print(f"  {yellow('i')}  {dim(msg)}")
+
+def response_box(label, resp, lat, err, width=56):
+    top    = f"  +-- {bold(label)} " + "-" * max(0, width - len(label) - 5) + "+"
+    bottom = "  +" + "-" * (width + 1) + "+"
+    print(top)
+    if err:
+        print(f"  |  {red('Error:')} {err[:width-10]}")
+    elif resp:
+        choices = resp.get("choices", [])
+        content = choices[0]["message"]["content"] if choices else ""
+        model   = resp.get("model", "?")
+        usage   = resp.get("usage", {})
+        t_in    = usage.get("prompt_tokens", "?")
+        t_out   = usage.get("completion_tokens", "?")
+        # Wrap content
+        words, line = content.split(), ""
+        for word in words:
+            if len(line) + len(word) + 1 > width - 4:
+                print(f"  |  {dim(line)}")
+                line = word
+            else:
+                line = (line + " " + word).strip()
+        if line:
+            print(f"  |  {dim(line)}")
+        print(f"  |  {dim('')}")
+        print(f"  |  {green(model)}  {dim(f'{lat*1000:.0f}ms | in:{t_in} out:{t_out}')}")
+    print(bottom)
+
+# ── Routing decision explainer ────────────────────────────────────────────────
+
+# Mirrors the catalog in internal/domain/routing/router.go
+CATALOG = [
+    ("claude-opus-4.7",   5.00,  0.98, 0.90, 0.99, 0.88),
+    ("gpt-5.2",           1.50,  0.94, 0.93, 0.95, 0.86),
+    ("gpt-5.3-codex",     1.75,  0.84, 0.98, 0.88, 0.78),
+    ("gemini-3.1-pro",    2.00,  0.96, 0.88, 1.00, 0.94),
+    ("deepseek-v3-0324",  0.27,  0.84, 0.78, 0.88, 0.76),
+    ("llama-4-scout",     0.11,  0.76, 0.70, 0.78, 0.74),
+    ("gemma-3-27b",       0.07,  0.68, 0.62, 0.70, 0.72),
+]
+# columns: model, cost/1M, reasoning, coding, math, multilingual
+
+TASK_WEIGHTS = {
+    "reasoning":    (1, 0, 0, 0),
+    "coding":       (0, 1, 0, 0),
+    "math":         (0, 0, 1, 0),
+    "multilingual": (0, 0, 0, 1),
+    "general":      (0.25, 0.25, 0.25, 0.25),
+}
+
+def explain_routing(task, budget):
+    """Return sorted list of (model, score, cost, passes_budget) from catalog."""
+    weights = TASK_WEIGHTS.get(task, TASK_WEIGHTS["general"])
+    rows = []
+    for model, cost, *caps in CATALOG:
+        passes = (budget <= 0 or cost <= budget)
+        score = sum(w * c for w, c in zip(weights, caps))
+        rows.append((model, score, cost, passes))
+    rows.sort(key=lambda r: (-r[3], -r[1]))  # budget-passing first, then score
+    return rows
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
 
-def scenario_basic(port, model, label):
-    section("Scenario 1 — Basic routing (explicit model)")
-    note(f"Sends a request to ixr specifying {label}.")
-    note("ixr resolves the model prefix to the right provider and forwards the call.")
+def scenario_routing_transparency(port, providers):
+    section("Showcase 1 — What ixr actually does (routing transparency)")
+    note("ixr sits between your code and the LLM. Same OpenAI-shaped request,")
+    note("different provider under the hood. Here we send the exact same prompt")
+    note("to every configured provider and show the results side by side.")
     print()
-    print(f"  Request: model={bold(model)}")
 
-    resp, lat, err = chat(port, {
-        "model": model,
-        "messages": [{"role": "user", "content": "Reply with exactly: ixr routing works!"}],
-    })
-    print_result(resp, lat, err)
+    question = "In one sentence, what is a neural network?"
+    calls = [
+        ({"model": m, "messages": [{"role": "user", "content": question}]}, {})
+        for _, m, pname, _, _ in providers
+    ]
+    print(f"  Prompt: {bold(repr(question))}")
+    print(f"  Firing {len(calls)} provider(s) in parallel via ixr...\n")
+
+    results = chat_parallel(port, calls)
+    for (_, m, pname, mshort, free), (resp, lat, err) in zip(providers, results):
+        tier = green("free") if free else yellow("paid")
+        label = f"{pname}/{mshort} [{tier}]"
+        response_box(label, resp, lat, err)
+
+    print()
+    note("Your application sent ONE type of request. ixr handled all provider")
+    note("differences (auth, base URL, API shape) transparently.")
 
 
 def scenario_auto_routing(port):
-    section("Scenario 2 — Auto-routing  (model=\"auto\")")
-    note("ixr's scoring engine picks a model from its internal catalog.")
-    note("X-IXR-Task=coding  X-IXR-Budget=2.0 → scorer maximises capability, penalises cost.")
-    print()
-    print(f"  Request: model={bold('auto')}  task=coding  budget=$2.00/1M")
+    section("Showcase 2 — Auto-routing: ixr picks the model for you")
+    note("Set model='auto' and pass task/budget headers. ixr's scoring engine")
+    note("runs the catalog through a weighted capability + cost formula and picks")
+    note("the best match. Here's the scoring table for each task type:\n")
 
-    resp, lat, err = chat(port, {
-        "model": "auto",
-        "messages": [{"role": "user", "content": "What is 2+2?"}],
-    }, extra_headers={
-        "X-IXR-Task": "coding",
-        "X-IXR-Budget": "2.0",
-    })
-    print_result(resp, lat, err)
-    if err and "no provider" in (err or ""):
-        note("The auto-selected catalog model has no configured provider key — add it to proceed.")
-    if resp:
-        note("ixr chose the catalog model with the highest coding score within the $2/1M cap.")
-
-
-def scenario_tight_budget(port):
-    section("Scenario 3 — Budget-constrained auto-routing")
-    note("Budget $0.20/1M eliminates expensive models; scorer picks cheapest capable option.")
-    print()
-    print(f"  Request: model={bold('auto')}  task=reasoning  budget=$0.20/1M")
-
-    resp, lat, err = chat(port, {
-        "model": "auto",
-        "messages": [{"role": "user", "content": "Explain recursion in one sentence."}],
-    }, extra_headers={
-        "X-IXR-Task": "reasoning",
-        "X-IXR-Budget": "0.20",
-    })
-    print_result(resp, lat, err)
-
-
-def scenario_latency(port):
-    section("Scenario 4 — Latency-sensitive auto-routing")
-    note("X-IXR-Latency: sensitive boosts the latency weight in the scoring formula (×1.5).")
-    print()
-    print(f"  Request: model={bold('auto')}  task=math  latency=sensitive")
-
-    resp, lat, err = chat(port, {
-        "model": "auto",
-        "messages": [{"role": "user", "content": "Is 17 a prime number? Answer yes or no."}],
-    }, extra_headers={
-        "X-IXR-Task": "math",
-        "X-IXR-Latency": "sensitive",
-    })
-    print_result(resp, lat, err)
-
-
-def scenario_use_case(port, model):
-    section("Scenario 5 — Use-case tagging  (X-IXR-UseCase)")
-    note("Attaches a business label to every CallEvent published on the bus.")
-    note("The audit-log and telemetry plugins read it for per-product observability.")
-    print()
-    print(f"  Request: model={bold(model)}  X-IXR-UseCase=demo-session")
-
-    resp, lat, err = chat(port, {
-        "model": model,
-        "messages": [{"role": "user", "content": "Say: telemetry tagged."}],
-    }, extra_headers={
-        "X-IXR-UseCase": "demo-session",
-    })
-    print_result(resp, lat, err)
-    if resp:
-        note("Bus emitted: CallEvent{use_case_id: 'demo-session', provider: '...', latency_ms: ...}")
-
-
-def scenario_shadow(port, primary_model, shadow_model, shadow_label):
-    section("Scenario 6 — Shadow routing  (phase-2_2)")
-    note("X-IXR-Shadow-Model sends the same prompt to a second model in the background.")
-    note("The caller only gets the primary response; the shadow result goes to the event bus.")
-    note("Use this to compare quality or cost before committing to a provider switch.")
-    print()
-    print(f"  Primary: {bold(primary_model)}")
-    print(f"  Shadow:  {bold(shadow_model)}  ({shadow_label})  ← async, never blocks caller")
-    print()
-    print(f"  Request: model={bold(primary_model)}  X-IXR-Shadow-Model={bold(shadow_model)}")
-
-    resp, lat, err = chat(port, {
-        "model": primary_model,
-        "messages": [{"role": "user", "content": "What color is the sky? One word."}],
-    }, extra_headers={
-        "X-IXR-Shadow-Model": shadow_model,
-    })
-    print_result(resp, lat, err)
-    if resp:
-        note("Shadow CallEvent carries ShadowMetadata{primary_id, primary_model, shadow_model}.")
-
-
-def scenario_streaming_note():
-    section("Scenario 7 — Streaming infrastructure  (phase-2_2)")
-    note("phase-2_2 added StreamWriter (SSE) and the streamHandler skeleton.")
-    note("Streaming is scaffolded and ready for provider-level wiring in phase 3.")
-    note("Sending stream=true right now returns a descriptive 501:")
-    print()
-    print(f"    {dim('POST /v1/chat/completions  {\"stream\": true, ...}')}")
-    print(f"    {yellow('← 501')}: streaming is not yet supported; set stream=false")
-
-
-def scenario_domain_overview():
-    section("Phase-2 domain packages (not yet wired to HTTP)")
-    note("These pure-domain packages were built in phase-2 and are ready to wire up:")
-    print()
-    rows = [
-        ("Circuit breaker",   "internal/domain/circuitbreaker — tracks provider failure state"),
-        ("Intent parser",     "internal/domain/intent — maps X-IXR-Intent + complexity heuristic"),
-        ("Scoring engine",    "internal/domain/scoring — bandit + regret-based model scorer"),
-        ("Rate limiting",     "internal/domain/policy — per-tenant token-bucket enforcer"),
-        ("Routing filter",    "internal/domain/routing — filters on cost/latency/circuit state"),
-        ("Fallback chains",   "internal/domain/routing — BuildFallbackChain from scorer output"),
+    tasks = [
+        ("coding",    2.0,  "X-IXR-Task: coding  X-IXR-Budget: 2.0"),
+        ("reasoning", 0.0,  "X-IXR-Task: reasoning  (no budget cap)"),
+        ("math",      0.30, "X-IXR-Task: math  X-IXR-Budget: 0.30"),
     ]
-    for name, desc in rows:
-        print(f"  {green('▸')}  {bold(name):24}  {dim(desc)}")
+
+    for task, budget, hdrs in tasks:
+        rows = explain_routing(task, budget)
+        winner = next((r for r in rows if r[3]), None)
+        print(f"  {bold(task.upper())}  {dim(hdrs)}")
+        for model, score, cost, passes in rows[:4]:
+            marker = green("-> SELECTED") if (winner and model == winner[0]) else dim("         ")
+            cost_s = f"${cost:.2f}/1M" if cost > 0 else "free"
+            budget_s = "" if passes else red(" [over budget]")
+            print(f"     {marker}  {model:<22} score={score:.2f}  {cost_s}{budget_s}")
+        if not winner:
+            print(f"     {red('No model passed the budget filter.')}")
+        print()
+
+        if winner:
+            resp, lat, err = chat(port, {
+                "model": "auto",
+                "messages": [{"role": "user", "content": f"What is {task}? One sentence."}],
+            }, extra_headers={
+                "X-IXR-Task": task,
+                **({"X-IXR-Budget": str(budget)} if budget > 0 else {}),
+            })
+            if err and "no provider" in err:
+                note(f"Catalog picked '{winner[0]}' but that provider key isn't configured.")
+            elif err:
+                note(f"Call failed: {err}")
+            else:
+                model_used = resp.get("model", "?") if resp else "?"
+                content = resp["choices"][0]["message"]["content"] if resp and resp.get("choices") else ""
+                print(f"     {green('Response via')} {bold(model_used)}  {dim(f'({lat*1000:.0f}ms)')}")
+                print(f"     {dim(content[:120])}")
+            print()
+
+
+def scenario_shadow(port, primary, shadow):
+    section("Showcase 3 — Shadow routing (phase-2_2)")
+    note("X-IXR-Shadow-Model fires a second call in the background.")
+    note("The CALLER only waits for the primary. The shadow result goes to the")
+    note("event bus so you can compare quality offline before switching providers.\n")
+
+    _, pm, ppname, pmshort, _ = primary
+    _, sm, spname, smshort, _ = shadow
+    question = "What is the difference between a list and a tuple in Python?"
+
+    print(f"  Prompt:  {bold(repr(question))}")
+    print(f"  Primary: {bold(ppname + '/' + pmshort)}")
+    print(f"  Shadow:  {bold(spname + '/' + smshort)} (async, not blocking caller)\n")
+
+    resp, lat, err = chat(port, {
+        "model": pm,
+        "messages": [{"role": "user", "content": question}],
+    }, extra_headers={"X-IXR-Shadow-Model": sm})
+
+    response_box(f"PRIMARY  {ppname}/{pmshort}", resp, lat, err)
+
     print()
-    note("phase-2_2 adds: ExecuteWithFallback, tenant.MemoryStore, config hot-reload,")
-    note("secrets injection, and Redis/Postgres store interfaces for circuit/perf/policy data.")
+    print(f"  {yellow('Shadow call fired in background.')} ixr published:")
+    print(f"  {dim('  CallEvent{shadow: {primary_id: resp.id, primary_model: ' + repr(pm) + ', shadow_model: ' + repr(sm) + '}}')}")
+    note("Shadow response is in the bus — poll it to compare against primary.")
 
-
-# ── Feature summary table ─────────────────────────────────────────────────────
+# ── Feature summary ───────────────────────────────────────────────────────────
 
 ALL_FEATURES = [
     ("basic_routing",           "Basic OpenAI-compatible proxy routing"),
@@ -310,7 +295,7 @@ ALL_FEATURES = [
     ("routing_filter_scorer",   "Routing filter + scorer + fallback chain"),
     ("shadow_routing",          "Shadow routing (HTTP-wired, async, bus-published)"),
     ("streaming_sse",           "SSE StreamWriter + streamHandler skeleton"),
-    ("telemetry_plugin",        "Telemetry plugin (CallEvent → TelemetryRecord)"),
+    ("telemetry_plugin",        "Telemetry plugin (CallEvent -> TelemetryRecord)"),
     ("config_hot_reload",       "Config hot-reload + secret injection"),
     ("secrets_management",      "Secrets management in config layer"),
     ("tenant_management",       "Multi-tenant policy + credential selection"),
@@ -318,113 +303,146 @@ ALL_FEATURES = [
     ("redis_postgres_stores",   "Redis/Postgres store interfaces (circuit, perf, policy)"),
 ]
 
-def interactive_chat(port, model, label):
-    section("Interactive chat  (type 'quit' to exit)")
-    note(f"Your questions go through ixr -> {label}.")
-    note("Multi-turn context is NOT kept between questions (stateless proxy demo).")
-    print()
+def print_feature_summary(features, branch):
+    section(f"What this branch adds  ({branch})")
+    for key, label in ALL_FEATURES:
+        mark = green("+ ") if key in features else dim("  ")
+        print(f"    {mark}{label}")
+
+# ── Interactive chat ──────────────────────────────────────────────────────────
+
+MODES = {
+    "1": "Direct (you choose the model)",
+    "2": "Auto-route (ixr picks based on task)",
+    "3": "Compare (same question, two models)",
+}
+
+def interactive_chat(port, providers, has_shadow):
+    section("Interactive chat")
+    note("ixr is still running. Try it yourself.\n")
+
+    primary = providers[0]
+    secondary = providers[1] if len(providers) > 1 else None
+    _, pm, ppname, pmshort, _ = primary
+
     while True:
+        print(f"  Mode:  {bold('[1]')} Direct  {bold('[2]')} Auto-route  {bold('[3]')} Compare  {bold('[q]')} Quit")
         try:
-            question = input(f"  {cyan('Ask a question:')} ").strip()
+            mode = input(f"  {cyan('Choose mode:')} ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             break
-        if question.lower() in ("quit", "exit", "q", ""):
+        if mode in ("q", "quit", "exit"):
             break
-        resp, lat, err = chat(port, {
-            "model": model,
-            "messages": [{"role": "user", "content": question}],
-        })
-        if err:
-            print(f"  {red('Error:')} {err}")
-        elif resp:
-            choices = resp.get("choices", [])
-            content = choices[0]["message"]["content"] if choices else ""
-            model_used = resp.get("model", model)
-            usage = resp.get("usage", {})
-            t_in  = usage.get("prompt_tokens", "?")
-            t_out = usage.get("completion_tokens", "?")
-            print(f"  {green('Answer:')} {content}")
-            print(f"  {dim(f'[via ixr -> {model_used} | {lat*1000:.0f} ms | in:{t_in} out:{t_out}]')}")
+        if mode not in ("1", "2", "3"):
+            continue
+
+        try:
+            question = input(f"  {cyan('Ask:')} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not question:
+            continue
+
         print()
 
+        if mode == "1":
+            print(f"  {dim('Routing: direct -> ' + ppname + '/' + pmshort)}")
+            resp, lat, err = chat(port, {
+                "model": pm,
+                "messages": [{"role": "user", "content": question}],
+            }, extra_headers={"X-IXR-UseCase": "demo-interactive"})
+            response_box(f"{ppname}/{pmshort}", resp, lat, err)
 
-def print_feature_summary(features):
-    print()
-    print(f"  {bold(cyan('Branch feature summary'))}")
-    print(f"  {dim('─' * 56)}")
-    for key, label in ALL_FEATURES:
-        mark = green("✓") if key in features else dim("·")
-        print(f"    {mark}  {label}")
-    print()
-    print(f"  {dim('Run  ./demo/demo.sh <branch>  to demo a different branch.')}")
-    print()
+        elif mode == "2":
+            tasks = ["general", "reasoning", "coding", "math", "multilingual"]
+            print(f"  Task: {dim(', '.join(f'[{t[0]}]{t[1:]}' for t in tasks))} (enter=general)")
+            try:
+                task = input(f"  {cyan('Task type:')} ").strip().lower() or "general"
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if task not in tasks:
+                task = "general"
+
+            rows = explain_routing(task, 0.0)
+            winner = rows[0] if rows else None
+            if winner:
+                print(f"  {dim('ixr scoring -> selected:')} {bold(winner[0])}  "
+                      f"{dim(f'(score={winner[1]:.2f}, ${winner[2]:.2f}/1M)')}")
+            resp, lat, err = chat(port, {
+                "model": "auto",
+                "messages": [{"role": "user", "content": question}],
+            }, extra_headers={
+                "X-IXR-Task": task,
+                "X-IXR-UseCase": "demo-interactive",
+            })
+            label = f"AUTO -> {resp.get('model', '?')}" if resp else "AUTO"
+            response_box(label, resp, lat, err)
+            if err and "no provider" in (err or ""):
+                note(f"Catalog chose '{winner[0] if winner else '?'}' but that provider key isn't set.")
+
+        elif mode == "3":
+            if not secondary:
+                note("Only one provider is configured — can't compare. Add a second API key.")
+            else:
+                _, sm, spname, smshort, _ = secondary
+                print(f"  {dim('Firing')} {bold(ppname + '/' + pmshort)} {dim('and')} "
+                      f"{bold(spname + '/' + smshort)} {dim('in parallel...')}")
+                results = chat_parallel(port, [
+                    ({"model": pm, "messages": [{"role": "user", "content": question}]}, {}),
+                    ({"model": sm, "messages": [{"role": "user", "content": question}]}, {}),
+                ])
+                response_box(f"{ppname}/{pmshort}", *results[0])
+                response_box(f"{spname}/{smshort}", *results[1])
+
+        print()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port",   type=int, default=7001)
-    parser.add_argument("--branch", default="phase-2_2")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--port",   type=int, default=7001)
+    p.add_argument("--branch", default="phase-2_2")
+    p.add_argument("--log",    default="")
+    args = p.parse_args()
 
     features  = features_for(args.branch)
     providers = detect_providers()
 
     print()
-    print(f"  {bold('Branch:')}  {cyan(args.branch)}")
-    print(f"  {bold('Server:')}  http://localhost:{args.port}")
+    print(f"  {bold('ixr demo')}  |  branch: {cyan(args.branch)}  |  port: {args.port}")
     print()
 
     if not providers:
-        print(f"  {red('No API keys detected.')} Set at least one of:")
-        for env_var, _, label, free in FREE_PROVIDERS:
-            tier = "free" if free else "paid"
-            print(f"    export {env_var}=...   # {label}  [{tier}]")
-        print()
-        print(f"  {yellow('Tip:')} Free-tier keys available at:")
-        print(f"  cerebras.ai  ·  console.groq.com  ·  console.mistral.ai  ·  cloud.sambanova.ai")
+        print(f"  {red('No API keys found.')} Set at least one:")
+        for env_var, _, pname, _, free in FREE_PROVIDERS:
+            print(f"    export {env_var}=...  # {pname}  [{'free' if free else 'paid'}]")
         sys.exit(1)
 
-    print(f"  {bold('Configured providers:')}")
-    for env_var, model, label, free in providers:
+    print(f"  {bold('Providers:')}")
+    for _, m, pname, mshort, free in providers:
         tier = green("free") if free else yellow("paid")
-        print(f"    {green('✓')}  {label}  [{tier}]")
+        print(f"    {green('v')}  {pname:<12} {mshort}  [{tier}]")
 
-    primary_env, primary_model, primary_label, _ = providers[0]
-    secondary = providers[1] if len(providers) > 1 else None
-
-    # Scenarios always available
-    scenario_basic(args.port, primary_model, primary_label)
+    # Showcases
+    scenario_routing_transparency(args.port, providers)
     scenario_auto_routing(args.port)
-    scenario_tight_budget(args.port)
-    scenario_latency(args.port)
-    scenario_use_case(args.port, primary_model)
 
-    # Shadow routing — wired in phase-2_2
-    if "shadow_routing" in features:
-        if secondary:
-            _, shadow_model, shadow_label, _ = secondary
-            scenario_shadow(args.port, primary_model, shadow_model, shadow_label)
-        else:
-            section("Scenario 6 — Shadow routing  (phase-2_2)")
-            note("Shadow routing is wired in (X-IXR-Shadow-Model header).")
-            note(f"Only one provider is configured ({primary_label}); add a second key to see it.")
-    else:
-        section("Scenario 6 — Shadow routing")
-        note(f"Shadow routing was added in phase-2_2. Current branch: {bold(args.branch)}.")
-        note("Switch to phase-2_2 to demo this feature.")
+    if "shadow_routing" in features and len(providers) >= 2:
+        scenario_shadow(args.port, providers[0], providers[1])
+    elif "shadow_routing" in features:
+        section("Showcase 3 — Shadow routing (phase-2_2)")
+        note("Shadow routing is wired in. Add a second provider key to demo it.")
 
-    if "streaming_sse" in features:
-        scenario_streaming_note()
+    # What this branch has
+    print_feature_summary(features, args.branch)
 
-    if "circuit_breaker_domain" in features:
-        scenario_domain_overview()
+    # Interactive
+    interactive_chat(args.port, providers, "shadow_routing" in features)
 
-    print_feature_summary(features)
-
-    # Interactive chat — enter after scenarios so the user can try it live
-    interactive_chat(args.port, primary_model, primary_label)
+    print(f"\n  {green('Done.')}  Server log: {args.log or 'see demo.sh output'}\n")
 
 
 if __name__ == "__main__":

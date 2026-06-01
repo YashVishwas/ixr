@@ -209,7 +209,7 @@ echo "  $(bold '─────────────────────�
 echo "  $(bold '  Running demo scenarios...')"
 echo "  $(bold '─────────────────────────────────────────────')"
 
-python3 "$DEMO_DIR/run_demo.py" --port "$PORT" --branch "$BRANCH"
+python3 "$DEMO_DIR/run_demo.py" --port "$PORT" --branch "$BRANCH" --log "$WORKTREE_BASE/ixr.log"
 
 echo ""
 echo "  $(green 'Demo complete.')"
