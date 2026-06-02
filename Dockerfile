@@ -8,5 +8,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /ixr ./cmd/ixr
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /ixr /ixr
-EXPOSE 7000
+EXPOSE 8080
 ENTRYPOINT ["/ixr"]

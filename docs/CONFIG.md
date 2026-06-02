@@ -7,7 +7,7 @@ This document is a placeholder — full spec ships in phase 2.
 
 ```yaml
 # ixr.yaml
-port: 7000
+port: 8080
 providers:
   openai:
     api_key: ${OPENAI_API_KEY}

@@ -24,24 +24,14 @@ check-deps:
 	fi
 	@echo "OK"
 
-# cross-compile binaries for all supported platforms into dist/
+# build binary for Apple Silicon (darwin/arm64)
+# Intel Mac, Linux, Windows targets will be added later
 dist:
 	@mkdir -p $(DIST)
-	@echo "Building $(VERSION) for all platforms..."
-	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-arm64       ./cmd/ixr
-	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-amd64       ./cmd/ixr
-	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-linux-amd64        ./cmd/ixr
-	GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-linux-arm64        ./cmd/ixr
-	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-windows-amd64.exe  ./cmd/ixr
+	@echo "Building $(VERSION) for Apple Silicon (darwin/arm64)..."
+	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-arm64 ./cmd/ixr
 	@echo ""
-	@echo "Binaries written to $(DIST)/:"
-	@ls -lh $(DIST)/
-	@echo ""
-	@echo "Download the right file for your machine:"
-	@echo "  Mac (Apple Silicon / M1/M2/M3):  $(DIST)/ixr-darwin-arm64"
-	@echo "  Mac (Intel):                     $(DIST)/ixr-darwin-amd64"
-	@echo "  Linux:                           $(DIST)/ixr-linux-amd64"
-	@echo "  Windows:                         $(DIST)/ixr-windows-amd64.exe"
+	@echo "Binary written to $(DIST)/ixr-darwin-arm64"
 
 clean:
 	rm -rf bin/ dist/ coverage.txt

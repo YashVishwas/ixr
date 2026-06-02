@@ -44,7 +44,7 @@ type config struct {
 	configFile string
 }
 
-// WithPort overrides the listen port (default: 7000).
+// WithPort overrides the listen port (default: 8080).
 func WithPort(port int) Option {
 	return func(c *config) { c.port = port }
 }
@@ -58,7 +58,7 @@ func WithConfigFile(path string) Option {
 // Start starts the ixr proxy and blocks until the process receives SIGINT/SIGTERM
 // or a fatal error occurs. It is the one-line entry point for embedding ixr.
 func Start(opts ...Option) error {
-	cfg := &config{port: 7000}
+	cfg := &config{port: 8080}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -210,7 +210,7 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	port := cfg.port
 
 	if fileCfg != nil {
-		if fileCfg.Server.Port != 0 && cfg.port == 7000 {
+		if fileCfg.Server.Port != 0 && cfg.port == 8080 {
 			port = fileCfg.Server.Port
 		}
 		for name, pc := range fileCfg.Providers {
