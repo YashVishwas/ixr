@@ -24,14 +24,19 @@ check-deps:
 	fi
 	@echo "OK"
 
-# build binary for Apple Silicon (darwin/arm64)
-# Intel Mac, Linux, Windows targets will be added later
+# build binaries for macOS — Apple Silicon and Intel
+# Linux, Windows targets will be added later
 dist:
 	@mkdir -p $(DIST)
-	@echo "Building $(VERSION) for Apple Silicon (darwin/arm64)..."
+	@echo "Building $(VERSION) for macOS..."
 	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-arm64 ./cmd/ixr
+	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/ixr-darwin-amd64 ./cmd/ixr
 	@echo ""
-	@echo "Binary written to $(DIST)/ixr-darwin-arm64"
+	@echo "Binaries written to $(DIST)/:"
+	@ls -lh $(DIST)/ixr-darwin-*
+	@echo ""
+	@echo "  Apple Silicon (M1/M2/M3/M4):  $(DIST)/ixr-darwin-arm64"
+	@echo "  Intel Mac:                    $(DIST)/ixr-darwin-amd64"
 
 clean:
 	rm -rf bin/ dist/ coverage.txt

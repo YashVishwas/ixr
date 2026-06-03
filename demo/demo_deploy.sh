@@ -63,7 +63,7 @@ start_binary() {
   (cd "$REPO_ROOT" && make dist 2>&1) | sed 's/^/    /'
   echo ""
   echo "  $(bold 'Starting ixr binary on port')" "$(cyan "$PORT")..."
-  "$REPO_ROOT/dist/ixr-darwin-arm64" -port "$PORT" >"$LOG_FILE" 2>&1 &
+  "$REPO_ROOT/dist/ixr-darwin-amd64" -port "$PORT" >"$LOG_FILE" 2>&1 &
   SERVER_PID=$!
 }
 
