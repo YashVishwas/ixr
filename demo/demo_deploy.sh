@@ -59,10 +59,14 @@ select_mode() {
 
 start_binary() {
   echo ""
-  echo "  $(bold 'Building binary (darwin/arm64)...')"
+  echo "  $(bold 'Building binaries (macOS + Linux)...')"
   (cd "$REPO_ROOT" && make dist 2>&1) | sed 's/^/    /'
   echo ""
-  echo "  $(bold 'Starting ixr binary on port')" "$(cyan "$PORT")..."
+  echo "  $(yellow 'Note:') Linux binaries are built but cannot run on macOS."
+  echo "  $(yellow 'Note:') Use $(bold 'docker') mode to test Linux locally, or copy"
+  echo "         $(cyan 'dist/ixr-linux-amd64') / $(cyan 'dist/ixr-linux-arm64') to a Linux machine."
+  echo ""
+  echo "  $(bold 'Starting ixr (darwin/amd64) on port')" "$(cyan "$PORT")..."
   "$REPO_ROOT/dist/ixr-darwin-amd64" -port "$PORT" >"$LOG_FILE" 2>&1 &
   SERVER_PID=$!
 }
