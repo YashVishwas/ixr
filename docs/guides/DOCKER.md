@@ -172,14 +172,30 @@ console.log(resp.choices[0].message.content);
 
 ## 7. Run the interactive demo
 
-The demo runs on your host against the container — no changes to the container needed.
+Use `demo_deploy.sh` — it starts the container **and** runs the demo in one terminal. No second terminal needed, and your API keys are forwarded automatically:
 
 ```bash
-# Get the demo script (demo_test branch)
-git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
+export ANTHROPIC_API_KEY="sk-ant-..."
+./demo/demo_deploy.sh docker
+```
 
-# Container must already be running (step 2 or 3)
-python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2
+To test a specific Linux architecture:
+
+```bash
+./demo/demo_deploy.sh docker-amd64   # linux/amd64 — Intel Linux
+./demo/demo_deploy.sh docker-arm64   # linux/arm64 — ARM Linux
+```
+
+**Running manually (two terminals):** if you start the container yourself, you must export your API key in **both** terminals — the terminal running the container and the terminal running `run_demo.py`:
+
+```bash
+# Terminal 1 — start container (API key needed here for the server)
+export ANTHROPIC_API_KEY="sk-ant-..."
+docker run -d --name ixr -p 8080:8080 -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" ixr
+
+# Terminal 2 — run the demo (API key needed here for provider detection)
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 demo/run_demo.py --port 8080 --branch demo_cross_compile
 ```
 
 ---
@@ -210,17 +226,35 @@ docker run -d --name ixr -p 8081:8081 \
 ```bash
 docker logs ixr
 ```
-Most common cause: no API keys were passed, so ixr exits with "no providers configured".
+Most common cause: no API keys were passed, so ixr exits with "no providers configured". Make sure you pass `-e ANTHROPIC_API_KEY="..."` (or another key) on `docker run`.
 
 **"port is already allocated"**
-Change the host port: `-p 8081:8080`
-
-**Apple Silicon — image not found for arm64**
-If you built from source with `docker build`, the Dockerfile targets `linux/amd64` by default. Docker Desktop on Apple Silicon transparently runs this via Rosetta. To build a native arm64 image:
-
+Another process is using port 8080. Find and kill it:
 ```bash
-docker buildx build --platform linux/arm64 -t ixr-arm64 --load .
-docker run -d --name ixr -p 8080:8080 -e ANTHROPIC_API_KEY="..." ixr-arm64
+lsof -ti :8080 | xargs kill -9
+```
+Or use a different host port: `-p 8081:8080` (then curl/demo against port 8081).
+
+**Docker socket not found (newer Docker Desktop for Mac)**
+If you see `dial unix ...docker.sock: no such file or directory`:
+```bash
+sudo ln -sf ~/.docker/desktop/docker.sock /var/run/docker.sock
+```
+Or set the env var before running:
+```bash
+export DOCKER_HOST="unix://$HOME/.docker/desktop/docker.sock"
 ```
 
-Or just use the ghcr.io image which is already multi-arch.
+**API keys not detected by the demo script**
+The demo script (`run_demo.py`) checks keys in the terminal it runs in. If you started the container manually in a different terminal, re-export your key in the terminal running the demo. Use `demo_deploy.sh` to avoid this entirely.
+
+**Build a specific Linux architecture**
+```bash
+# linux/amd64 (Intel Linux)
+docker buildx build --platform linux/amd64 -t ixr:amd64 --load .
+docker run -d --name ixr -p 8080:8080 -e ANTHROPIC_API_KEY="..." ixr:amd64
+
+# linux/arm64 (ARM Linux)
+docker buildx build --platform linux/arm64 -t ixr:arm64 --load .
+docker run -d --name ixr -p 8080:8080 -e ANTHROPIC_API_KEY="..." ixr:arm64
+```

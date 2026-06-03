@@ -252,14 +252,23 @@ func askIXR(question string) (string, error) {
 
 ## 7. Run the interactive demo
 
-With ixr embedded and running, run the demo script against it from another terminal:
+Use `demo_deploy.sh` for the simplest path — starts ixr via `go run` and runs the demo in one terminal:
 
 ```bash
-# Get the demo (demo_test branch)
-git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
+export ANTHROPIC_API_KEY="sk-ant-..."
+./demo/demo_deploy.sh embed
+```
 
-# Run demo against your embedded instance
-python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2
+**Running manually (two terminals):** if you start your Go service yourself, export your API key in **both** terminals — one for your service and one for the demo script:
+
+```bash
+# Terminal 1 — your service (with ixr embedded)
+export ANTHROPIC_API_KEY="sk-ant-..."
+go run .
+
+# Terminal 2 — run the demo (key must be set here too)
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 demo/run_demo.py --port 8080 --branch demo_cross_compile
 ```
 
 The demo shows live routing decisions, multi-provider comparisons, shadow routing, and drops into interactive chat — all going through the ixr instance inside your process.

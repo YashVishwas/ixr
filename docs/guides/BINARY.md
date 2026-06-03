@@ -188,15 +188,23 @@ console.log(resp.choices[0].message.content);
 
 ## 6. Run the interactive demo
 
-The demo shows ixr's routing decisions, multi-provider comparison, and shadow testing, then drops into an interactive chat.
+Use `demo_deploy.sh` for the simplest experience — it builds the binary, starts ixr, and runs the demo all in one terminal:
 
 ```bash
-# Get the demo script (demo_test branch)
-git clone --branch demo_test https://github.com/YashVishwas/ixr.git ixr-demo
+export ANTHROPIC_API_KEY="sk-ant-..."
+./demo/demo_deploy.sh binary
+```
 
-# ixr must already be running (step 3 above)
-# Tell the demo script which port ixr is on
-python3 ixr-demo/demo/run_demo.py --port 8080 --branch phase-2_2
+**Running manually (two terminals):** if you start ixr yourself, export your API key in **both** terminals:
+
+```bash
+# Terminal 1 — start ixr
+export ANTHROPIC_API_KEY="sk-ant-..."
+./ixr-darwin-arm64 --config ixr.yaml
+
+# Terminal 2 — run the demo (key must be set here too)
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 demo/run_demo.py --port 8080 --branch demo_cross_compile
 ```
 
 The demo detects which API keys you have set and adapts its scenarios automatically.
