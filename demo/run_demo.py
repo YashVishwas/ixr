@@ -29,7 +29,9 @@ def white(t):  return _c("1;37", t)
 # ── Branch features ───────────────────────────────────────────────────────────
 
 BRANCH_FEATURES = {
-    "main": {"basic_routing", "auto_routing", "event_bus"},
+    "main":               {"basic_routing", "auto_routing", "event_bus"},
+    "demo_test":          {"basic_routing", "auto_routing", "event_bus"},
+    "demo_cross_compile": {"basic_routing", "auto_routing", "event_bus"},
     "phase-2": {
         "basic_routing", "auto_routing", "event_bus",
         "circuit_breaker_domain", "intent_parser", "scoring_engine",
