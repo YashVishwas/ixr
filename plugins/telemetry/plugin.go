@@ -3,7 +3,6 @@ package telemetry
 
 import (
 	"context"
-	"time"
 
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
@@ -29,7 +28,7 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 		UseCaseID: ev.UseCaseID,
 		Model:     ev.Model,
 		Provider:  ev.Provider,
-		LatencyMS: int(ev.Latency / time.Millisecond),
+		LatencyMS: int(ev.LatencyMS),
 		TokensIn:  ev.TokensIn,
 		TokensOut: ev.TokensOut,
 		CostUSD:   ev.Cost.TotalUSD,

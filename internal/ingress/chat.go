@@ -86,7 +86,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Timestamp: start,
 			Provider:  p.Name(),
 			Model:     req.Model,
-			Latency:   latency,
+			LatencyMS: latency.Milliseconds(),
 			Request:   req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
 		}
@@ -171,7 +171,7 @@ func (h *ChatHandler) publishShadowEvent(
 		UseCaseID: useCaseID,
 		Provider:  providerName,
 		Model:     shadowReq.Model,
-		Latency:   latency,
+		LatencyMS: latency.Milliseconds(),
 		Request:   shadowReq,
 		Shadow: &schema.ShadowMetadata{
 			PrimaryID:    primaryID,

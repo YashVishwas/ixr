@@ -1,0 +1,8 @@
+.git
+dist/
+services/
+*.md
+demo/
+docs/
+examples/
+scripts/

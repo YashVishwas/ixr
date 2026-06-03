@@ -12,7 +12,7 @@ type CallEvent struct {
 	UseCaseID string           `json:"use_case_id"` // from X-IXR-UseCase header
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
-	Latency   time.Duration    `json:"latency_ms"`
+	LatencyMS int64            `json:"latency_ms"`
 	TokensIn  int              `json:"tokens_in"`
 	TokensOut int              `json:"tokens_out"`
 	Cost      CostBreakdown    `json:"cost"`
