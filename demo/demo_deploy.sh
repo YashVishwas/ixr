@@ -62,9 +62,9 @@ start_binary() {
   echo "  $(bold 'Building binaries (macOS + Linux)...')"
   (cd "$REPO_ROOT" && make dist 2>&1) | sed 's/^/    /'
   echo ""
-  echo "  $(yellow 'Note:') Linux binaries are built but cannot run on macOS."
-  echo "  $(yellow 'Note:') Use $(bold 'docker') mode to test Linux locally, or copy"
-  echo "         $(cyan 'dist/ixr-linux-amd64') / $(cyan 'dist/ixr-linux-arm64') to a Linux machine."
+  echo "  $(yellow 'Note:') Linux and Windows binaries are built but cannot run on macOS."
+  echo "  $(yellow 'Note:') Use $(bold 'docker') mode to test Linux locally."
+  echo "         Copy $(cyan 'dist/ixr-linux-*') to a Linux machine, $(cyan 'dist/ixr-windows-amd64.exe') to Windows."
   echo ""
   echo "  $(bold 'Starting ixr (darwin/amd64) on port')" "$(cyan "$PORT")..."
   "$REPO_ROOT/dist/ixr-darwin-amd64" -port "$PORT" >"$LOG_FILE" 2>&1 &
