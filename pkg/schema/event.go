@@ -19,6 +19,15 @@ type CallEvent struct {
 	Request   RequestEnvelope  `json:"request"`
 	Response  ResponseEnvelope `json:"response"`
 	Error     string           `json:"error,omitempty"`
+	Shadow    *ShadowMetadata  `json:"shadow,omitempty"`
+}
+
+// ShadowMetadata identifies events produced by shadow routing. Shadow responses
+// are emitted for telemetry and offline comparison, never returned to callers.
+type ShadowMetadata struct {
+	PrimaryID    string `json:"primary_id,omitempty"`
+	PrimaryModel string `json:"primary_model,omitempty"`
+	ShadowModel  string `json:"shadow_model,omitempty"`
 }
 
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.
