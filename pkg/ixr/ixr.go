@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,25 +25,32 @@ import (
 	cfgloader "github.com/YashVishwas/ixr/internal/adapters/config"
 	"github.com/YashVishwas/ixr/internal/adapters/pluginmgr"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/anthropic"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/bedrock"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/cerebras"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/deepseek"
 	githubmodels "github.com/YashVishwas/ixr/internal/adapters/providers/githubmodels"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/googleai"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/llama"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/llamacpp"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/local"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/mistral"
+	"github.com/YashVishwas/ixr/internal/adapters/providers/ollama"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openai"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openrouter"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/sambanova"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
+	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/internal/ingress"
+	"github.com/YashVishwas/ixr/internal/observability"
 	"github.com/YashVishwas/ixr/pkg/provider"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Option configures the ixr instance.
@@ -77,6 +85,21 @@ func Start(opts ...Option) error {
 		return err
 	}
 
+	// --- Observability ---
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	otlpEndpoint := os.Getenv("IXR_OTLP_ENDPOINT")
+	shutdownTracer, tracerErr := observability.InitTracer(ctx, "ixr", otlpEndpoint)
+	if tracerErr != nil {
+		return fmt.Errorf("tracer init: %w", tracerErr)
+	}
+	defer func() { _ = shutdownTracer(context.Background()) }()
+
+	promReg := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(promReg)
+	_ = metrics // used via record() in handler (passed via context in future; wired at mux level for now)
+
 	// --- Stores ---
 	perfStore := modelperf.NewMemory()
 	policyMem := policystore.NewMemory(nil)
@@ -102,6 +125,11 @@ func Start(opts ...Option) error {
 	// --- Adaptive routing ---
 	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
 	shadowOrch := scoring.NewOrchestrator(perfStore, scoring.DefaultRewardWeights, bandit)
+
+	// --- Semantic cache ---
+	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
+	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
+	responseCache := cache.NewMemory(cacheSize, cacheTTL)
 
 	// --- Chat handler ---
 	chatHandler := ingress.NewChatHandler(
@@ -133,10 +161,30 @@ func Start(opts ...Option) error {
 		authMW = ingress.NewAuthMiddleware(cfgloader.AuthConfig{DisableAuth: true}, resolver)
 	}
 
-	// --- Middleware chain: auth → rate limit → chat ---
+	// --- Mux ---
 	mux := http.NewServeMux()
-	chain := authMW.Handler(rateMW.Handler(chatHandler))
-	mux.Handle("POST /v1/chat/completions", chain)
+
+	// Observability stack wrapping: requestID → trace → handler
+	obs := func(h http.Handler) http.Handler {
+		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
+	}
+
+	// Chat completions: auth → rate limit → cache → chat
+	chatChain := authMW.Handler(rateMW.Handler(
+		ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler),
+	))
+	mux.Handle("POST /v1/chat/completions", obs(chatChain))
+
+	// Non-chat endpoints: auth → handler (no caching)
+	embeddingsHandler := ingress.NewEmbeddingsHandler(router)
+	mux.Handle("POST /v1/embeddings", obs(authMW.Handler(embeddingsHandler)))
+
+	imagesHandler := ingress.NewImagesHandler(router)
+	mux.Handle("POST /v1/images/generations", obs(authMW.Handler(imagesHandler)))
+
+	// Schema and metrics are unauthenticated
+	mux.Handle("GET /v1/schema", ingress.NewSchemaHandler())
+	mux.Handle("GET /metrics", observability.Handler(promReg))
 
 	// --- Config hot reload ---
 	if cfg.configFile != "" && fileCfg != nil {
@@ -148,9 +196,6 @@ func Start(opts ...Option) error {
 			rl.Reload(newCfg.RateLimit)
 		})
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	go memBus.Start(ctx)
 
@@ -165,11 +210,46 @@ func Start(opts ...Option) error {
 	return ingress.NewServer(port, mux).Run(ctx)
 }
 
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 // buildRouter constructs the prefix-based model→provider dispatch function.
 func buildRouter(registry map[string]provider.Provider) ingress.Router {
 	return func(model string) (provider.Provider, error) {
 		m := strings.ToLower(model)
 		switch {
+		// Local adapters take priority for explicitly local-prefixed model names
+		case strings.HasPrefix(m, "ollama/"):
+			p, ok := registry["ollama"]
+			if !ok {
+				return nil, fmt.Errorf("ollama provider not configured (start Ollama and set OLLAMA_BASE_URL or ixr.yaml providers.ollama)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "llamacpp/"):
+			p, ok := registry["llamacpp"]
+			if !ok {
+				return nil, fmt.Errorf("llamacpp provider not configured (start llama.cpp server and set LLAMACPP_BASE_URL or ixr.yaml providers.llamacpp)")
+			}
+			return p, nil
+		case strings.HasPrefix(m, "local/"):
+			p, ok := registry["local"]
+			if !ok {
+				return nil, fmt.Errorf("local provider not configured (set LOCAL_BASE_URL or ixr.yaml providers.local)")
+			}
+			return p, nil
+		// AWS Bedrock
+		case strings.HasPrefix(m, "amazon.") || strings.HasPrefix(m, "anthropic.") || strings.HasPrefix(m, "meta."):
+			p, ok := registry["bedrock"]
+			if !ok {
+				return nil, fmt.Errorf("bedrock provider not configured (set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION or ixr.yaml providers.bedrock)")
+			}
+			return p, nil
 		case strings.HasPrefix(m, "gpt-oss"):
 			p, ok := registry["cerebras"]
 			if !ok {
@@ -347,6 +427,16 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, *cfgloader.Config
 				if pc.APIKey != "" {
 					registry["zhipu"] = zhipu.New(pc.APIKey, pc.BaseURL)
 				}
+			case "ollama":
+				registry["ollama"] = ollama.New(pc.APIKey, pc.BaseURL)
+			case "llamacpp":
+				registry["llamacpp"] = llamacpp.New(pc.APIKey, pc.BaseURL)
+			case "local":
+				if pc.BaseURL != "" {
+					registry["local"] = local.New("local", pc.APIKey, pc.BaseURL)
+				}
+			case "bedrock":
+				// bedrock uses separate credential fields via env or config extension
 			}
 		}
 	}
@@ -389,6 +479,35 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, *cfgloader.Config
 	}
 	if key := os.Getenv("ZHIPU_API_KEY"); key != "" {
 		registry["zhipu"] = zhipu.New(key, "")
+	}
+	// AWS Bedrock: region + static credentials from environment
+	if region := os.Getenv("AWS_REGION"); region == "" {
+		_ = os.Getenv("AWS_DEFAULT_REGION") // tolerate either
+	}
+	awsRegion := os.Getenv("AWS_REGION")
+	if awsRegion == "" {
+		awsRegion = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	if awsRegion != "" && os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+		registry["bedrock"] = bedrock.New(
+			awsRegion,
+			os.Getenv("AWS_ACCESS_KEY_ID"),
+			os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			os.Getenv("AWS_SESSION_TOKEN"),
+		)
+	}
+	// Local model adapters
+	if base := os.Getenv("OLLAMA_BASE_URL"); base != "" {
+		registry["ollama"] = ollama.New("", base)
+	} else if _, alreadySet := registry["ollama"]; !alreadySet {
+		// Register Ollama on default port if not explicitly configured; it may not be running.
+		registry["ollama"] = ollama.New("", "")
+	}
+	if base := os.Getenv("LLAMACPP_BASE_URL"); base != "" {
+		registry["llamacpp"] = llamacpp.New("", base)
+	}
+	if base := os.Getenv("LOCAL_BASE_URL"); base != "" {
+		registry["local"] = local.New("local", os.Getenv("LOCAL_API_KEY"), base)
 	}
 
 	if len(registry) == 0 {

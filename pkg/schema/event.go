@@ -32,9 +32,17 @@ type DeltaChunk struct {
 
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.
 type RequestEnvelope struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream,omitempty"`
+	Model       string  `json:"model"`
+	Messages    []Message `json:"messages"`
+	Stream      bool    `json:"stream,omitempty"`
+	Tools       []Tool  `json:"tools,omitempty"`
+	ToolChoice  any     `json:"tool_choice,omitempty"` // string | ToolChoiceObject
+	Temperature float64 `json:"temperature,omitempty"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
+	TopP        float64 `json:"top_p,omitempty"`
+	N           int     `json:"n,omitempty"`
+	Stop        any     `json:"stop,omitempty"` // string | []string
+	User        string  `json:"user,omitempty"`
 }
 
 // ResponseEnvelope is ixr's canonical representation of a chat response,

@@ -31,3 +31,14 @@ type Provider interface {
 	// that error. Context cancellation terminates the stream immediately.
 	Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(StreamChunk) error) error
 }
+
+// Embedder is implemented by providers that support the /v1/embeddings endpoint.
+// Providers that don't support embeddings need not implement this interface.
+type Embedder interface {
+	Embed(ctx context.Context, req *schema.EmbeddingRequest) (*schema.EmbeddingResponse, error)
+}
+
+// ImageGenerator is implemented by providers that support /v1/images/generations.
+type ImageGenerator interface {
+	GenerateImage(ctx context.Context, req *schema.ImageRequest) (*schema.ImageResponse, error)
+}

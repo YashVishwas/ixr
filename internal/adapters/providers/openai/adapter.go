@@ -125,6 +125,64 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 	return scanner.Err()
 }
 
+// Embed sends an embedding request to OpenAI's /v1/embeddings endpoint.
+func (a *Adapter) Embed(ctx context.Context, req *schema.EmbeddingRequest) (*schema.EmbeddingResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal embedding request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("openai: build embedding request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai: do embedding request: %w", err)
+	}
+	defer httpResp.Body.Close()
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openai: embedding status %d: %s", httpResp.StatusCode, respBody)
+	}
+	var resp schema.EmbeddingResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("openai: decode embedding response: %w", err)
+	}
+	return &resp, nil
+}
+
+// GenerateImage calls OpenAI's /v1/images/generations endpoint.
+func (a *Adapter) GenerateImage(ctx context.Context, req *schema.ImageRequest) (*schema.ImageResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal image request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/images/generations", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("openai: build image request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("openai: do image request: %w", err)
+	}
+	defer httpResp.Body.Close()
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openai: image status %d: %s", httpResp.StatusCode, respBody)
+	}
+	var resp schema.ImageResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("openai: decode image response: %w", err)
+	}
+	return &resp, nil
+}
+
 func deltaToChunk(d *wireDeltaResponse) provider.StreamChunk {
 	chunk := provider.StreamChunk{ID: d.ID, Model: d.Model}
 	if len(d.Choices) > 0 {
