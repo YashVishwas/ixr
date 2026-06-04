@@ -8,7 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
+	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/pkg/bus"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -17,17 +20,48 @@ import (
 // Router picks a provider for a given model name.
 type Router func(model string) (provider.Provider, error)
 
+// ChatOption applies optional configuration to a ChatHandler.
+type ChatOption func(*ChatHandler)
+
+// WithEngine configures a live scoring engine for model="auto" routing.
+func WithEngine(e *scoring.Engine) ChatOption {
+	return func(h *ChatHandler) { h.engine = e }
+}
+
+// WithCBRegistry wires a circuit breaker registry into auto-routing decisions.
+func WithCBRegistry(cb *circuitbreaker.Registry) ChatOption {
+	return func(h *ChatHandler) { h.cbRegistry = cb }
+}
+
+// WithShadow attaches a shadow routing orchestrator.
+func WithShadow(s *scoring.Orchestrator) ChatOption {
+	return func(h *ChatHandler) { h.shadow = s }
+}
+
+// WithRetryConfig overrides the default retry/backoff settings.
+func WithRetryConfig(cfg routing.RetryConfig) ChatOption {
+	return func(h *ChatHandler) { h.retryCfg = cfg }
+}
+
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
-	router Router
-	bus    bus.Bus
+	router     Router
+	bus        bus.Bus
+	engine     *scoring.Engine
+	cbRegistry *circuitbreaker.Registry
+	shadow     *scoring.Orchestrator
+	retryCfg   routing.RetryConfig
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
 // Pass a non-nil bus to emit CallEvents after each request.
-func NewChatHandler(router Router, b bus.Bus) *ChatHandler {
-	return &ChatHandler{router: router, bus: b}
+func NewChatHandler(router Router, b bus.Bus, opts ...ChatOption) *ChatHandler {
+	h := &ChatHandler{router: router, bus: b, retryCfg: routing.DefaultRetryConfig}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,20 +81,23 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Streaming is phase 2 — reject early with a clear message.
-	if req.Stream {
-		writeError(w, http.StatusNotImplemented, "streaming_not_supported", "streaming is not yet supported; set stream=false")
-		return
-	}
-
 	if req.Model == "auto" {
 		hint := taskHintFromHeaders(r, &req)
-		resolved := routing.Route(hint)
-		if resolved == "" {
-			writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
-			return
+		if h.engine != nil {
+			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
+			if err != nil || decision.Model == "" {
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given constraints")
+				return
+			}
+			req.Model = decision.Model
+		} else {
+			resolved := routing.Route(hint)
+			if resolved == "" {
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+				return
+			}
+			req.Model = resolved
 		}
-		req.Model = resolved
 	}
 
 	p, err := h.router(req.Model)
@@ -69,11 +106,17 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Stream {
+		h.handleStream(w, r, p, &req)
+		return
+	}
+
 	start := time.Now()
 	resp, err := p.Chat(r.Context(), &req)
 	latency := time.Since(start)
 
 	if h.bus != nil {
+		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
 			Timestamp: start,
 			Provider:  p.Name(),
@@ -81,6 +124,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Latency:   latency,
 			Request:   req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+			TenantID:  id.TenantID,
 		}
 		if err != nil {
 			ev.Error = err.Error()
@@ -104,6 +148,60 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("failed to write response", "err", err)
+	}
+}
+
+func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming_error", "server does not support streaming")
+		return
+	}
+
+	writeSSEHeader(w)
+
+	var totalIn, totalOut int
+	start := time.Now()
+
+	streamErr := p.Stream(r.Context(), req, func(chunk provider.StreamChunk) error {
+		if chunk.Usage != nil {
+			totalIn = chunk.Usage.PromptTokens
+			totalOut = chunk.Usage.CompletionTokens
+		}
+		if err := writeSSEChunk(w, chunk); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	})
+
+	writeSSEDone(w)
+	flusher.Flush()
+
+	if h.bus != nil {
+		id := identity.FromContext(r.Context())
+		ev := &schema.CallEvent{
+			Timestamp: start,
+			Provider:  p.Name(),
+			Model:     req.Model,
+			Latency:   time.Since(start),
+			Request:   *req,
+			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+			TenantID:  id.TenantID,
+			TokensIn:  totalIn,
+			TokensOut: totalOut,
+			Streaming: true,
+		}
+		if streamErr != nil {
+			ev.Error = streamErr.Error()
+		}
+		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
+			slog.Warn("bus publish error (stream)", "err", pubErr)
+		}
+	}
+
+	if streamErr != nil {
+		slog.Error("stream error", "provider", p.Name(), "model", req.Model, "err", streamErr)
 	}
 }
 

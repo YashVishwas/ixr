@@ -15,8 +15,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
+	"github.com/YashVishwas/ixr/plugins/telemetry"
 
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
 	cfgloader "github.com/YashVishwas/ixr/internal/adapters/config"
@@ -32,6 +34,13 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openrouter"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/sambanova"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
+	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
+	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/policy"
+	"github.com/YashVishwas/ixr/internal/domain/routing"
+	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/pkg/provider"
 )
@@ -63,12 +72,102 @@ func Start(opts ...Option) error {
 		o(cfg)
 	}
 
-	registry, port, err := buildRegistry(cfg)
+	registry, fileCfg, port, err := buildRegistry(cfg)
 	if err != nil {
 		return err
 	}
 
-	router := ingress.Router(func(model string) (provider.Provider, error) {
+	// --- Stores ---
+	perfStore := modelperf.NewMemory()
+	policyMem := policystore.NewMemory(nil)
+
+	// --- Circuit breaker ---
+	cbRegistry := circuitbreaker.NewRegistry(circuitbreaker.DefaultPolicy)
+
+	// --- Scoring engine ---
+	scoringEngine := scoring.NewEngine(perfStore, policyMem, routing.Catalog())
+
+	// --- Identity resolver ---
+	resolver := &identity.Resolver{}
+
+	// --- Router (model name → provider) ---
+	router := buildRouter(registry)
+
+	// --- Event bus + plugins ---
+	memBus := bus.NewMemory(0)
+	mgr := pluginmgr.New(memBus)
+	mgr.Register(&auditlog.Plugin{})
+	mgr.Register(telemetry.New(perfStore, telemetry.NewJSONLinesSink(os.Stderr)))
+
+	// --- Adaptive routing ---
+	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
+	shadowOrch := scoring.NewOrchestrator(perfStore, scoring.DefaultRewardWeights, bandit)
+
+	// --- Chat handler ---
+	chatHandler := ingress.NewChatHandler(
+		router,
+		memBus,
+		ingress.WithEngine(scoringEngine),
+		ingress.WithCBRegistry(cbRegistry),
+		ingress.WithShadow(shadowOrch),
+	)
+
+	// --- Rate limiter ---
+	var rl policy.RateLimiter
+	if fileCfg != nil {
+		rl = policy.NewMemoryRateLimiter(
+			fileCfg.RateLimit.MaxRequests,
+			fileCfg.RateLimit.MaxTokens,
+			time.Duration(fileCfg.RateLimit.WindowSec)*time.Second,
+		)
+	} else {
+		rl = policy.NewMemoryRateLimiter(0, 0, 60*time.Second)
+	}
+	rateMW := ingress.NewRateLimitMiddleware(rl)
+
+	// --- Auth middleware ---
+	var authMW *ingress.AuthMiddleware
+	if fileCfg != nil {
+		authMW = ingress.NewAuthMiddleware(fileCfg.Auth, resolver)
+	} else {
+		authMW = ingress.NewAuthMiddleware(cfgloader.AuthConfig{DisableAuth: true}, resolver)
+	}
+
+	// --- Middleware chain: auth → rate limit → chat ---
+	mux := http.NewServeMux()
+	chain := authMW.Handler(rateMW.Handler(chatHandler))
+	mux.Handle("POST /v1/chat/completions", chain)
+
+	// --- Config hot reload ---
+	if cfg.configFile != "" && fileCfg != nil {
+		_, _ = cfgloader.Watch(cfg.configFile, func(newCfg *cfgloader.Config, watchErr error) {
+			if watchErr != nil || newCfg == nil {
+				return
+			}
+			authMW.Reload(newCfg.Auth)
+			rl.Reload(newCfg.RateLimit)
+		})
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go memBus.Start(ctx)
+
+	// --- Server (TLS or plain) ---
+	if fileCfg != nil && fileCfg.Server.TLSCert != "" {
+		srv, tlsErr := ingress.NewServerTLS(port, mux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
+		if tlsErr != nil {
+			return fmt.Errorf("TLS setup: %w", tlsErr)
+		}
+		return srv.Run(ctx)
+	}
+	return ingress.NewServer(port, mux).Run(ctx)
+}
+
+// buildRouter constructs the prefix-based model→provider dispatch function.
+func buildRouter(registry map[string]provider.Provider) ingress.Router {
+	return func(model string) (provider.Provider, error) {
 		m := strings.ToLower(model)
 		switch {
 		case strings.HasPrefix(m, "gpt-oss"):
@@ -171,38 +270,23 @@ func Start(opts ...Option) error {
 		default:
 			return nil, fmt.Errorf("no provider found for model %q", model)
 		}
-	})
-
-	memBus := bus.NewMemory(0)
-	mgr := pluginmgr.New(memBus)
-	mgr.Register(&auditlog.Plugin{})
-
-	mux := http.NewServeMux()
-	mux.Handle("POST /v1/chat/completions", ingress.NewChatHandler(router, memBus))
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	go memBus.Start(ctx)
-
-	return ingress.NewServer(port, mux).Run(ctx)
+	}
 }
 
 // buildRegistry constructs the provider map and effective port from config file or env vars.
-func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
-	// Try config file first: explicit path → auto-discover → fall back to env.
+func buildRegistry(cfg *config) (map[string]provider.Provider, *cfgloader.Config, int, error) {
 	var fileCfg *cfgloader.Config
 	var err error
 
 	if cfg.configFile != "" {
 		fileCfg, err = cfgloader.Load(cfg.configFile)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 	} else {
 		fileCfg, err = cfgloader.Discover()
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 	}
 
@@ -308,8 +392,8 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	}
 
 	if len(registry) == 0 {
-		return nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
+		return nil, nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
 	}
 
-	return registry, port, nil
+	return registry, fileCfg, port, nil
 }

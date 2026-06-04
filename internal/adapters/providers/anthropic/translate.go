@@ -14,6 +14,7 @@ type wireRequest struct {
 	Messages  []wireMessage `json:"messages"`
 	System    string        `json:"system,omitempty"`
 	MaxTokens int           `json:"max_tokens"`
+	Stream    bool          `json:"stream,omitempty"`
 }
 
 type wireMessage struct {
@@ -42,6 +43,43 @@ type wireUsage struct {
 }
 
 const defaultMaxTokens = 4096
+
+// wireRequest adds the stream flag for streaming calls.
+func (w *wireRequest) withStream() wireRequest {
+	cp := *w
+	cp.Stream = true
+	return cp
+}
+
+// SSE stream wire types for the Anthropic streaming Messages API.
+
+type streamMessageStart struct {
+	Type    string `json:"type"`
+	Message struct {
+		ID    string     `json:"id"`
+		Model string     `json:"model"`
+		Usage wireUsage  `json:"usage"`
+	} `json:"message"`
+}
+
+type streamContentBlockDelta struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+	Delta struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"delta"`
+}
+
+type streamMessageDelta struct {
+	Type  string `json:"type"`
+	Delta struct {
+		StopReason string `json:"stop_reason"`
+	} `json:"delta"`
+	Usage struct {
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+}
 
 // toWireRequest converts ixr's canonical envelope to the Anthropic Messages API format.
 // System messages are lifted out of the messages array into the top-level system field,

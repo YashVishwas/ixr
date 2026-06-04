@@ -10,6 +10,7 @@ type CallEvent struct {
 	ID        string           `json:"id"`
 	Timestamp time.Time        `json:"timestamp"`
 	UseCaseID string           `json:"use_case_id"` // from X-IXR-UseCase header
+	TenantID  string           `json:"tenant_id"`   // from identity context
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
 	Latency   time.Duration    `json:"latency_ms"`
@@ -19,6 +20,14 @@ type CallEvent struct {
 	Request   RequestEnvelope  `json:"request"`
 	Response  ResponseEnvelope `json:"response"`
 	Error     string           `json:"error,omitempty"`
+	Streaming bool             `json:"streaming,omitempty"`
+}
+
+// DeltaChunk is one streaming delta for stream-mode CallEvents on the bus.
+type DeltaChunk struct {
+	Index   int    `json:"index"`
+	Content string `json:"content"`
+	Role    string `json:"role,omitempty"`
 }
 
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.

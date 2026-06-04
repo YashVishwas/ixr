@@ -1,5 +1,21 @@
 package routing
 
-// filter removes candidate models that violate hard constraints:
-// max_cost_usd, max_latency_ms (p95), and circuit-breaker exclusions.
-// Implementation: phase 2 (scoring engine).
+import "github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+
+// Filter removes models that violate hard constraints:
+//   - blended cost > hint.MaxCostUSDPer1M (when cap > 0)
+//   - circuit breaker is open (when cb is non-nil)
+func Filter(models []ModelCard, hint TaskHint, cb *circuitbreaker.Registry) []ModelCard {
+	inputShare := estimateInputShare(hint.PromptChars)
+	var out []ModelCard
+	for _, m := range models {
+		if hint.MaxCostUSDPer1M > 0 && blendedCost(m, inputShare) > hint.MaxCostUSDPer1M {
+			continue
+		}
+		if cb != nil && !cb.IsAllowed(m.ID) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}

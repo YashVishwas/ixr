@@ -3,6 +3,7 @@
 package googleai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
@@ -91,4 +93,81 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 	}
 
 	return fromGenWireResponse(req.Model, &wireResp)
+}
+
+// Stream sends req to :streamGenerateContent?alt=sse and delivers each chunk to fn.
+// Google streams a sequence of full GenerateContentResponse JSON objects as SSE data lines.
+func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
+	wire := toGenWireRequest(req)
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return fmt.Errorf("%s: marshal stream request: %w", a.providerName, err)
+	}
+
+	apiURL := fmt.Sprintf(
+		"%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s",
+		a.baseURL,
+		url.PathEscape(req.Model),
+		url.QueryEscape(a.apiKey),
+	)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("%s: build stream request: %w", a.providerName, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%s: do stream request: %w", a.providerName, err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(httpResp.Body)
+		return fmt.Errorf("%s: stream status %d: %s", a.providerName, httpResp.StatusCode, b)
+	}
+
+	scanner := bufio.NewScanner(httpResp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			return nil
+		}
+
+		var wr genWireResponse
+		if err := json.Unmarshal([]byte(data), &wr); err != nil {
+			continue
+		}
+		if len(wr.Candidates) == 0 {
+			continue
+		}
+		c0 := wr.Candidates[0]
+		text, _ := extractText(c0.Content.Parts)
+
+		u := schema.Usage{
+			PromptTokens:     wr.UsageMetadata.PromptTokenCount,
+			CompletionTokens: wr.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:      wr.UsageMetadata.TotalTokenCount,
+		}
+		var usagePtr *schema.Usage
+		if wr.UsageMetadata.TotalTokenCount > 0 {
+			usagePtr = &u
+		}
+
+		chunk := provider.StreamChunk{
+			Model:        req.Model,
+			Delta:        schema.Message{Role: "assistant", Content: text},
+			FinishReason: mapFinishReason(c0.FinishReason),
+			Usage:        usagePtr,
+		}
+		if err := fn(chunk); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
 }
