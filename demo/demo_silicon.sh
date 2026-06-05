@@ -130,6 +130,9 @@ server:
 
 log_level: warn
 
+auth:
+  disable_auth: true
+
 providers:
   openai:
     api_key: \${OPENAI_API_KEY}
