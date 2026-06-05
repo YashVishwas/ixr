@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-05
+
+### Added
+- End-to-end SSE streaming for all 12 providers (`Stream` method on `provider.Provider`)
+- JWT/API-key/mTLS auth middleware with hot-reload (`internal/ingress/auth.go`)
+- Sliding-window rate limiter with per-tenant token tracking (`internal/domain/policy`)
+- Circuit breaker state machine: Closed → Open → HalfOpen with configurable thresholds
+- Retry + exponential backoff executor with 4xx-skip and context-cancel abort (`internal/domain/routing/executor.go`)
+- Phase 2 scoring engine: policy-weighted filter → live `ModelPerfStore` stats → score → fallback chain (`internal/domain/scoring/engine.go`)
+- Epsilon-greedy and UCB bandit algorithms with atomic regret tracking (`internal/domain/scoring/bandit.go`)
+- Shadow routing: background goroutines per shadow model feeding bandit feedback (`internal/domain/scoring/shadow.go`)
+- Telemetry plugin: `CallEvent` → `TelemetryRecord` + `ModelPerfStore` upsert + JSON Lines sink
+- Config hot-reload via `fsnotify` with 200ms debounce; secrets expansion for Vault/AWS SSM
+- Multi-tenant identity resolver with per-request context propagation
+- OpenTelemetry tracing with OTLP HTTP export (no-op when `IXR_OTLP_ENDPOINT` unset)
+- Prometheus metrics on `GET /metrics`
+- `X-Request-ID` propagation middleware
+- SHA-256 exact-match semantic cache with LRU eviction + TTL (`internal/domain/cache`)
+- AWS Bedrock provider with raw SigV4 signing (no SDK dependency)
+- Ollama, llama.cpp, and generic local model providers
+- `POST /v1/embeddings` and `POST /v1/images/generations` with optional provider interfaces
+- Full tool-calling spec: `Tool`, `FunctionDef`, `ToolChoiceObject` in `pkg/schema`
+- Webhook fanout bus; NATS/Kafka/Kinesis/Pub/Sub compile stubs
+- JSON Schema registry on `GET /v1/schema`; `api/proto/ixr.proto` for gRPC clients
+- Redis/Postgres store interface stubs for `ModelPerfStore`, `PolicyStore`, circuit breaker state
+
+### Fixed
+- Provider entries in `ixr.yaml` with empty `api_key` are now silently skipped instead of failing startup
+
 ## [0.1.0] - 2026-05-08
 
 ### Added
