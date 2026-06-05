@@ -43,10 +43,13 @@ print_branch_info() {
   echo ""
   echo "  $(cyan 'main')         — OpenAI-compatible proxy, 12 provider adapters, auto-routing catalog"
   echo "  $(cyan 'phase-2')      — +circuit breaker, intent parser, scoring engine, rate limiting, routing filter"
-  echo "  $(cyan 'phase-2_2')    — +shadow testing (live), streaming (SSE), telemetry plugin, config"
-  echo "                     hot-reload, secrets, tenant management, executor with retry/fallback"
+  echo "  $(cyan 'phase-2_2')    — +shadow testing, streaming (SSE), telemetry plugin, config hot-reload,"
+  echo "                     secrets, tenant management, executor with retry/fallback"
+  echo "  $(cyan 'phase-2_3')    — +observability (OTEL traces, Prometheus metrics, request ID), semantic cache,"
+  echo "                     Bedrock/Ollama/llama.cpp/local providers, embeddings + images endpoints,"
+  echo "                     full tool-calling spec, bus adapters, schema registry"
   echo ""
-  echo "  $(yellow 'Note:') phase-2_2 is a superset of phase-2 (all phase-2 commits are in phase-2_2)."
+  echo "  $(yellow 'Note:') each branch is a superset of the previous."
   echo ""
 }
 
@@ -77,16 +80,16 @@ select_branch() {
     i=$((i+1))
   done
   echo ""
-  printf "  Enter number [default: phase-2_2]: "
+  printf "  Enter number [default: phase-2_3]: "
   read -r choice
   choice="${choice:-}"
 
   if [[ -z "$choice" ]]; then
-    BRANCH="phase-2_2"
+    BRANCH="phase-2_3"
   elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#branches[@]}" ]]; then
     BRANCH="${branches[$((choice-1))]}"
   else
-    BRANCH="phase-2_2"
+    BRANCH="phase-2_3"
   fi
 }
 
@@ -152,6 +155,10 @@ providers:
     api_key: \${GITHUB_TOKEN}
   zhipu:
     api_key: \${ZHIPU_API_KEY}
+  ollama:
+    base_url: \${OLLAMA_BASE_URL}
+  llamacpp:
+    base_url: \${LLAMACPP_BASE_URL}
 YAML
 }
 

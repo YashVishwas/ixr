@@ -45,6 +45,18 @@ BRANCH_FEATURES = {
         "config_hot_reload", "secrets_management", "tenant_management",
         "executor_retry_fallback", "redis_postgres_stores",
     },
+    "phase-2_3": {
+        "basic_routing", "auto_routing", "event_bus",
+        "circuit_breaker_domain", "intent_parser", "scoring_engine",
+        "rate_limit_domain", "routing_filter_scorer",
+        "shadow_routing", "streaming_sse", "telemetry_plugin",
+        "config_hot_reload", "secrets_management", "tenant_management",
+        "executor_retry_fallback", "redis_postgres_stores",
+        "observability_otel", "prometheus_metrics", "request_id_propagation",
+        "semantic_cache", "bus_adapters_fanout", "schema_registry",
+        "bedrock_provider", "ollama_llamacpp_providers",
+        "embeddings_endpoint", "images_endpoint", "full_tool_calling",
+    },
 }
 
 def features_for(branch):
@@ -284,6 +296,100 @@ def scenario_shadow(port, primary, shadow):
     print(f"  {dim('  CallEvent{shadow: {primary_id: resp.id, primary_model: ' + repr(pm) + ', shadow_model: ' + repr(sm) + '}}')}")
     note("Shadow response is in the bus — poll it to compare against primary.")
 
+
+def scenario_semantic_cache(port, provider_entry):
+    section("Showcase 4 — Semantic cache (phase-2_3)")
+    note("ixr caches non-streaming responses by SHA-256(model + messages).")
+    note("The second identical request is served from memory with X-Cache: HIT.\n")
+
+    _, model, pname, mshort, _ = provider_entry
+    question = "What does HTTP stand for?"
+    payload = {"model": model, "messages": [{"role": "user", "content": question}]}
+
+    print(f"  Prompt: {bold(repr(question))}\n")
+
+    # First call — cache miss.
+    resp1, lat1, err1 = chat(port, payload)
+    cache_status1 = "MISS (first call — cache cold)"
+    print(f"  {bold('Call 1')}  {dim(cache_status1)}")
+    response_box(f"{pname}/{mshort}", resp1, lat1, err1)
+
+    # Second call — should hit.
+    resp2, lat2, err2 = chat(port, payload)
+    speedup = f"  {green(f'{lat1/lat2:.1f}x faster')}" if resp1 and resp2 and lat2 > 0 else ""
+    print(f"\n  {bold('Call 2')}  {dim('HIT expected — served from in-memory cache')}{speedup}")
+    response_box(f"{pname}/{mshort} [cached]", resp2, lat2, err2)
+
+    print()
+    note("Cache is keyed on model + message content. Streaming requests bypass it.")
+    note("Default: 1024-entry LRU, 5-minute TTL (override with IXR_CACHE_SIZE / IXR_CACHE_TTL_SEC).")
+
+
+def scenario_schema_endpoint(port):
+    section("Showcase 5 — Schema registry (phase-2_3)")
+    note("GET /v1/schema returns the full JSON Schema for ixr's public API surface.")
+    note("REST clients can validate requests against it; no proto compiler needed.\n")
+
+    url = f"http://localhost:{port}/v1/schema"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            schema = json.loads(r.read())
+        paths = list(schema.get("paths", {}).keys())
+        defs  = list(schema.get("$defs", {}).keys())
+        print(f"  {green('GET /v1/schema')} -> {dim('200 OK')}")
+        print(f"  {bold('Paths defined:')}  {dim(', '.join(paths))}")
+        print(f"  {bold('Types defined:')}  {dim(', '.join(defs))}")
+        print(f"  {bold('Schema version:')} {dim(str(schema.get('version', '?')))}")
+    except Exception as e:
+        print(f"  {red('Schema endpoint error:')} {e}")
+
+    print()
+    note("Compile api/proto/ixr.proto for gRPC clients — same types, binary wire format.")
+
+
+def scenario_observability(port):
+    section("Showcase 6 — Observability (phase-2_3)")
+    note("Every request gets an X-Request-ID and an OTEL trace span.")
+    note("Prometheus metrics are exposed on GET /metrics.\n")
+
+    # Show a request ID being echoed back.
+    _, _, pname, mshort, _ = (None, None, "demo", "demo", False)
+    try:
+        providers_local = detect_providers()
+        if providers_local:
+            _, model, pname, mshort, _ = providers_local[0]
+            req = urllib.request.Request(
+                f"http://localhost:{port}/v1/chat/completions",
+                data=json.dumps({"model": model,
+                                 "messages": [{"role": "user", "content": "ping"}]}).encode(),
+                method="POST",
+            )
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                req_id = r.headers.get("X-Request-ID", "(not present)")
+            print(f"  {bold('X-Request-ID')} returned: {cyan(req_id)}")
+    except Exception:
+        pass
+
+    # Show Prometheus metrics snippet.
+    try:
+        mreq = urllib.request.Request(f"http://localhost:{port}/metrics", method="GET")
+        with urllib.request.urlopen(mreq, timeout=5) as r:
+            lines = r.read().decode().splitlines()
+        ixr_lines = [l for l in lines if l.startswith("ixr_")][:6]
+        if ixr_lines:
+            print(f"\n  {bold('GET /metrics')} (ixr_ family, first 6 lines):")
+            for line in ixr_lines:
+                print(f"    {dim(line)}")
+        else:
+            print(f"\n  {bold('GET /metrics')} -> {dim('200 OK')}  {dim('(scrape to see counters after traffic)')}")
+    except Exception as e:
+        print(f"  {red('/metrics error:')} {e}")
+
+    print()
+    note("Set IXR_OTLP_ENDPOINT=http://localhost:4318 to export traces to any OTLP collector.")
+
 # ── Feature summary ───────────────────────────────────────────────────────────
 
 ALL_FEATURES = [
@@ -293,16 +399,27 @@ ALL_FEATURES = [
     ("circuit_breaker_domain",  "Circuit breaker domain package"),
     ("intent_parser",           "Intent parser (X-IXR-Intent / complexity)"),
     ("scoring_engine",          "Bandit scoring engine with regret tracking"),
-    ("rate_limit_domain",       "Rate limiting domain (token bucket)"),
+    ("rate_limit_domain",       "Rate limiting domain (sliding window)"),
     ("routing_filter_scorer",   "Routing filter + scorer + fallback chain"),
-    ("shadow_routing",          "Shadow routing (HTTP-wired, async, bus-published)"),
-    ("streaming_sse",           "SSE StreamWriter + streamHandler skeleton"),
+    ("shadow_routing",          "Shadow routing (async, bus-published)"),
+    ("streaming_sse",           "End-to-end SSE streaming for all providers"),
     ("telemetry_plugin",        "Telemetry plugin (CallEvent -> TelemetryRecord)"),
     ("config_hot_reload",       "Config hot-reload + secret injection"),
-    ("secrets_management",      "Secrets management in config layer"),
+    ("secrets_management",      "Secrets management (Vault / AWS SSM)"),
     ("tenant_management",       "Multi-tenant policy + credential selection"),
-    ("executor_retry_fallback", "ExecuteWithFallback with retry + backoff"),
-    ("redis_postgres_stores",   "Redis/Postgres store interfaces (circuit, perf, policy)"),
+    ("executor_retry_fallback", "Retry + exponential backoff + fallback chain"),
+    ("redis_postgres_stores",   "Redis/Postgres store interfaces (stubs)"),
+    ("observability_otel",      "OpenTelemetry traces (OTLP export, no-op default)"),
+    ("prometheus_metrics",      "Prometheus metrics on GET /metrics"),
+    ("request_id_propagation",  "X-Request-ID propagation on every request"),
+    ("semantic_cache",          "Exact-match semantic cache (SHA-256, LRU+TTL)"),
+    ("bus_adapters_fanout",     "Bus adapters: webhook fanout, NATS/Kafka/Kinesis/Pub/Sub stubs"),
+    ("schema_registry",         "JSON Schema registry on GET /v1/schema + api/proto/ixr.proto"),
+    ("bedrock_provider",        "AWS Bedrock provider (SigV4, no SDK)"),
+    ("ollama_llamacpp_providers","Ollama + llama.cpp + generic local providers"),
+    ("embeddings_endpoint",     "POST /v1/embeddings (provider.Embedder interface)"),
+    ("images_endpoint",         "POST /v1/images/generations (provider.ImageGenerator)"),
+    ("full_tool_calling",       "Full tool-calling spec (Tool, FunctionDef, ToolChoice)"),
 ]
 
 def print_feature_summary(features, branch):
@@ -406,7 +523,7 @@ def interactive_chat(port, providers, has_shadow):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port",   type=int, default=8081)
-    p.add_argument("--branch", default="phase-2_2")
+    p.add_argument("--branch", default="phase-2_3")
     p.add_argument("--log",    default="")
     args = p.parse_args()
 
@@ -435,8 +552,17 @@ def main():
     if "shadow_routing" in features and len(providers) >= 2:
         scenario_shadow(args.port, providers[0], providers[1])
     elif "shadow_routing" in features:
-        section("Showcase 3 — Shadow routing (phase-2_2)")
+        section("Showcase 3 — Shadow routing")
         note("Shadow routing is wired in. Add a second provider key to demo it.")
+
+    if "semantic_cache" in features:
+        scenario_semantic_cache(args.port, providers[0])
+
+    if "schema_registry" in features:
+        scenario_schema_endpoint(args.port)
+
+    if "observability_otel" in features:
+        scenario_observability(args.port)
 
     # What this branch has
     print_feature_summary(features, args.branch)
