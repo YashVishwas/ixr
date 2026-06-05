@@ -30,11 +30,8 @@ func Validate(cfg *Config) error {
 		}
 	}
 
-	for name, pc := range cfg.Providers {
-		if pc.APIKey == "" {
-			errs = append(errs, fmt.Errorf("providers.%s: api_key must not be empty", name))
-		}
-	}
+	// Providers with an empty api_key are silently skipped by buildRegistry —
+	// listing a provider without a key is valid (key may come from env var or provider may be unused).
 
 	if cfg.Server.TLSCert != "" && cfg.Server.TLSKey == "" {
 		errs = append(errs, errors.New("server.tls_cert is set but server.tls_key is missing"))
