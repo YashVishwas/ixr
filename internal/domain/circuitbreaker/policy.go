@@ -1,3 +1,5 @@
+package circuitbreaker
+
 import "time"
 
 // Policy holds circuit breaker thresholds and probe logic.

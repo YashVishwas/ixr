@@ -1,92 +1,42 @@
-// Package circuitbreaker watches model health and excludes degraded models from routing.
-// States: closed (healthy) → open (excluded) → half-open (probe) → closed.
-// Circuit state is stored in Redis so all ixr instances see it immediately.
-package circuitbreaker
+package identity
 
-import "time"
+import "strings"
 
-// State is the circuit breaker lifecycle state.
-type State string
+// Headers is a map of header name to values; pass r.Header directly.
+type Headers map[string][]string
 
-const (
-	Closed   State = "closed"
-	Open     State = "open"
-	HalfOpen State = "half_open"
-)
-
-// Stats is the rolling model health snapshot used to evaluate transitions.
-type Stats struct {
-	Requests    int
-	SuccessRate float64
-	Window      time.Duration
+// Identity carries the normalized caller identity extracted from request headers.
+type Identity struct {
+	UserID    string
+	TenantID  string
+	UseCaseID string
+	RequestID string
 }
 
-// Breaker is a deterministic state machine for one provider/model circuit.
-type Breaker struct {
-	policy     Policy
-	state      State
-	openedAt   time.Time
-	halfOpenAt time.Time
+// Resolver extracts Identity from request headers.
+type Resolver struct {
+	DefaultTenantID string
 }
 
-// New creates a closed circuit breaker.
-func New(policy Policy) *Breaker {
-	if policy.FailureThreshold == 0 {
-		policy = DefaultPolicy()
+// Resolve reads X-IXR-User, X-IXR-Tenant, X-IXR-UseCase, and X-Request-ID headers.
+// Header names are matched case-insensitively. Nil headers yield defaults.
+func (r Resolver) Resolve(h Headers) Identity {
+	get := func(key string) string {
+		for k, vs := range h {
+			if strings.EqualFold(k, key) && len(vs) > 0 {
+				return strings.TrimSpace(vs[0])
+			}
+		}
+		return ""
 	}
-	return &Breaker{policy: policy, state: Closed}
-}
-
-// State returns the current circuit state.
-func (b *Breaker) State() State {
-	if b == nil {
-		return Closed
+	tenant := get("X-IXR-Tenant")
+	if tenant == "" {
+		tenant = r.DefaultTenantID
 	}
-	return b.state
-}
-
-// Allow reports whether a request may pass through the circuit.
-func (b *Breaker) Allow(now time.Time) bool {
-	if b == nil {
-		return true
-	}
-	if b.state == Open && now.Sub(b.openedAt) >= b.policy.HalfOpenAfter {
-		b.state = HalfOpen
-		b.halfOpenAt = now
-		return true
-	}
-	return b.state != Open
-}
-
-// ObserveHealth updates the circuit from rolling aggregate stats.
-func (b *Breaker) ObserveHealth(now time.Time, stats Stats) State {
-	if b == nil {
-		return Closed
-	}
-	if b.state != Closed {
-		return b.state
-	}
-	if stats.Requests < b.policy.MinRequests || stats.Window < b.policy.OpenAfter {
-		return b.state
-	}
-	if stats.SuccessRate < b.policy.FailureThreshold {
-		b.state = Open
-		b.openedAt = now
-	}
-	return b.state
-}
-
-// ProbeSucceeded closes a half-open circuit after a successful probe.
-func (b *Breaker) ProbeSucceeded() {
-	if b != nil && b.state == HalfOpen {
-		b.state = Closed
-	}
-}
-
-// ProbeFailed reopens a half-open circuit after a failed probe.
-func (b *Breaker) ProbeFailed(now time.Time) {
-	if b != nil && b.state == HalfOpen {
-		b.state = Open
-		b.openedAt = now
+	return Identity{
+		UserID:    get("X-IXR-User"),
+		TenantID:  tenant,
+		UseCaseID: get("X-IXR-UseCase"),
+		RequestID: get("X-Request-ID"),
 	}
 }
