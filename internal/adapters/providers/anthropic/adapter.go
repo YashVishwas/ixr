@@ -90,8 +90,7 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 // Stream sends req with stream=true using Anthropic's multi-event SSE format.
 // Sequence: message_start → content_block_delta* → message_delta → message_stop.
 func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
-	wr := toWireRequest(req)
-	wr.Stream = true
+	wr := toWireRequest(req).withStream()
 
 	body, err := json.Marshal(wr)
 	if err != nil {

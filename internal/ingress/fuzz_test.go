@@ -2,13 +2,11 @@ package ingress
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/YashVishwas/ixr/internal/domain/cache"
-	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
@@ -46,13 +44,6 @@ func FuzzCacheKey(f *testing.F) {
 		// Must not panic.
 		_ = cacheKeyForFuzz(req)
 	})
-}
-
-// stubStreamProvider satisfies provider.Provider for fuzz tests.
-type stubStreamProvider struct{ stubProvider }
-
-func (s *stubStreamProvider) Stream(_ context.Context, _ *schema.RequestEnvelope, _ func(provider.StreamChunk) error) error {
-	return s.err
 }
 
 func cacheKeyForFuzz(req *schema.RequestEnvelope) string {

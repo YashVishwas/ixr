@@ -92,7 +92,7 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 		}
 
 		var attempts int
-		err, attempts = streamWithRetry(ctx, p, req, cfg, fn)
+		attempts, err = streamWithRetry(ctx, p, req, cfg, fn)
 		totalAttempts += attempts
 
 		if err == nil {
@@ -138,28 +138,28 @@ func chatWithRetry(ctx context.Context, p provider.Provider, req *schema.Request
 	return nil, cfg.MaxAttempts, lastErr
 }
 
-func streamWithRetry(ctx context.Context, p provider.Provider, req *schema.RequestEnvelope, cfg RetryConfig, fn func(provider.StreamChunk) error) (error, int) {
+func streamWithRetry(ctx context.Context, p provider.Provider, req *schema.RequestEnvelope, cfg RetryConfig, fn func(provider.StreamChunk) error) (int, error) {
 	backoff := cfg.InitialBackoff
 	var lastErr error
 	for i := 0; i < cfg.MaxAttempts; i++ {
 		err := p.Stream(ctx, req, fn)
 		if err == nil {
-			return nil, i + 1
+			return i + 1, nil
 		}
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isClientError(err) {
-			return err, i + 1
+			return i + 1, err
 		}
 		if i < cfg.MaxAttempts-1 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err(), i + 1
+				return i + 1, ctx.Err()
 			case <-time.After(backoff):
 			}
 			backoff = minDuration(time.Duration(float64(backoff)*cfg.BackoffFactor), cfg.MaxBackoff)
 		}
 	}
-	return lastErr, cfg.MaxAttempts
+	return cfg.MaxAttempts, lastErr
 }
 
 // isClientError detects HTTP 4xx responses by inspecting the error message.

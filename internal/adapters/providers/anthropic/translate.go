@@ -45,10 +45,9 @@ type wireUsage struct {
 const defaultMaxTokens = 4096
 
 // wireRequest adds the stream flag for streaming calls.
-func (w *wireRequest) withStream() wireRequest {
-	cp := *w
-	cp.Stream = true
-	return cp
+func (w wireRequest) withStream() wireRequest {
+	w.Stream = true
+	return w
 }
 
 // SSE stream wire types for the Anthropic streaming Messages API.

@@ -14,7 +14,7 @@ import (
 )
 
 // faultProvider always returns an error simulating an upstream failure.
-type faultProvider struct{ code int }
+type faultProvider struct{}
 
 func (f *faultProvider) Name() string { return "fault" }
 func (f *faultProvider) Chat(_ context.Context, _ *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
@@ -24,18 +24,6 @@ func (f *faultProvider) Stream(_ context.Context, _ *schema.RequestEnvelope, _ f
 	return errors.New("upstream unavailable")
 }
 
-// slowProvider simulates a provider that blocks until context is cancelled.
-type slowProvider struct{}
-
-func (s *slowProvider) Name() string { return "slow" }
-func (s *slowProvider) Chat(ctx context.Context, _ *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-func (s *slowProvider) Stream(ctx context.Context, _ *schema.RequestEnvelope, _ func(provider.StreamChunk) error) error {
-	<-ctx.Done()
-	return ctx.Err()
-}
 
 func TestChaos_ProviderError_Returns502(t *testing.T) {
 	fp := &faultProvider{}
