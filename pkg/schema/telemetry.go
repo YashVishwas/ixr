@@ -20,5 +20,7 @@ type TelemetryRecord struct {
 	FinishReason string    `json:"finish_reason"`
 	FallbackUsed bool      `json:"fallback_used"` // was the primary model bypassed?
 	FallbackFrom string    `json:"fallback_from"` // which model failed
+	Shadow       bool      `json:"shadow"`
+	ShadowOf     string    `json:"shadow_of,omitempty"`
 	Timestamp    time.Time `json:"timestamp"`
 }
