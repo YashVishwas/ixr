@@ -27,6 +27,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	applyDefaults(&cfg)
+	if err := ResolveSecrets(&cfg); err != nil {
+		return nil, err
+	}
+	if err := Validate(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
