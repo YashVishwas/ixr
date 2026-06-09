@@ -14,13 +14,6 @@ type AuthPrincipal struct {
 	Subject string
 	KeyID   string
 	Scopes  []string
-	Caps    KeyCaps
-}
-
-// KeyCaps are per-key limits enforced by policy middleware.
-type KeyCaps struct {
-	AllowedModels []string
-	DailyUSD      float64
 }
 
 // JWTVerifier verifies a bearer token and returns its principal.
@@ -30,16 +23,8 @@ type JWTVerifier interface {
 
 // AuthConfig configures ingress authentication.
 type AuthConfig struct {
-	APIKeys     map[string]APIKey // key id -> key config
+	APIKeys     map[string]string // key id -> secret
 	JWTVerifier JWTVerifier
-	RequireMTLS bool
-}
-
-// APIKey configures one ixr ingress key.
-type APIKey struct {
-	Secret string
-	Scopes []string
-	Caps   KeyCaps
 }
 
 // authMiddleware verifies inbound API keys and JWT tokens.
@@ -48,10 +33,6 @@ func authMiddleware(next http.Handler, cfg AuthConfig) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if cfg.RequireMTLS && !hasClientCertificate(r) {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "client certificate is required")
-			return
-		}
 		if principal, ok := authenticateAPIKey(r, cfg.APIKeys); ok {
 			next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), principal)))
 			return
@@ -77,7 +58,7 @@ func PrincipalFromContext(ctx context.Context) (AuthPrincipal, bool) {
 	return principal, ok
 }
 
-func authenticateAPIKey(r *http.Request, keys map[string]APIKey) (AuthPrincipal, bool) {
+func authenticateAPIKey(r *http.Request, keys map[string]string) (AuthPrincipal, bool) {
 	if len(keys) == 0 {
 		return AuthPrincipal{}, false
 	}
@@ -85,9 +66,9 @@ func authenticateAPIKey(r *http.Request, keys map[string]APIKey) (AuthPrincipal,
 	if raw == "" {
 		return AuthPrincipal{}, false
 	}
-	for id, key := range keys {
-		if subtle.ConstantTimeCompare([]byte(raw), []byte(key.Secret)) == 1 {
-			return AuthPrincipal{Subject: id, KeyID: id, Scopes: key.Scopes, Caps: key.Caps}, true
+	for id, secret := range keys {
+		if subtle.ConstantTimeCompare([]byte(raw), []byte(secret)) == 1 {
+			return AuthPrincipal{Subject: id, KeyID: id}, true
 		}
 	}
 	return AuthPrincipal{}, false
@@ -104,8 +85,4 @@ func authenticateBearer(r *http.Request, verifier JWTVerifier) (AuthPrincipal, b
 	}
 	principal, err := verifier.Verify(r.Context(), token)
 	return principal, err == nil
-}
-
-func hasClientCertificate(r *http.Request) bool {
-	return r != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0
 }
