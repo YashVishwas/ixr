@@ -317,6 +317,7 @@ def show_event(ev, client_lat_ms=None):
         idx     = choice.get("index", 0)
         msg_c   = choice.get("message", {})
         content = str(msg_c.get("content") or "")
+        kv(f"choices[{idx}].index",         str(idx))
         kv(f"choices[{idx}].role",          str(msg_c.get("role", "?")))
         kv(f"choices[{idx}].finish_reason", str(choice.get("finish_reason", "?")))
         wrap_val(f"choices[{idx}].content", content)
