@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	cfgpkg "github.com/YashVishwas/ixr/internal/adapters/config"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
@@ -30,7 +29,7 @@ type Decision struct {
 type RateLimiter interface {
 	Check(ctx context.Context, id schema.Identity, tokenCost int) Decision
 	Record(ctx context.Context, id schema.Identity, tokensUsed int)
-	Reload(cfg cfgpkg.RateLimitConfig)
+	Reload(cfg RateLimit)
 }
 
 type windowEntry struct {
@@ -66,7 +65,7 @@ func NewMemoryRateLimiter(maxRequests, maxTokens int, windowDur time.Duration) *
 }
 
 // Reload updates limits atomically (for hot reload).
-func (m *MemoryRateLimiter) Reload(cfg cfgpkg.RateLimitConfig) {
+func (m *MemoryRateLimiter) Reload(cfg RateLimit) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.maxReq = cfg.MaxRequests

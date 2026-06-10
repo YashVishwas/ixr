@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	cfgpkg "github.com/YashVishwas/ixr/internal/adapters/config"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
@@ -100,7 +99,7 @@ func TestMemoryRateLimiter_Reload(t *testing.T) {
 		t.Fatal("should be limited after 1 record with cap=1")
 	}
 
-	rl.Reload(cfgpkg.RateLimitConfig{MaxRequests: 10, WindowSec: 60})
+	rl.Reload(RateLimit{MaxRequests: 10, WindowSec: 60})
 	if d := rl.Check(context.Background(), id1, 0); !d.Allowed {
 		t.Fatal("should be allowed after reload with higher cap")
 	}

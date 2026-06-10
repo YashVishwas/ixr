@@ -193,7 +193,11 @@ func Start(opts ...Option) error {
 				return
 			}
 			authMW.Reload(newCfg.Auth)
-			rl.Reload(newCfg.RateLimit)
+			rl.Reload(policy.RateLimit{
+				WindowSec:   newCfg.RateLimit.WindowSec,
+				MaxRequests: newCfg.RateLimit.MaxRequests,
+				MaxTokens:   newCfg.RateLimit.MaxTokens,
+			})
 		})
 	}
 
