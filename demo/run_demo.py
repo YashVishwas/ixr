@@ -259,9 +259,11 @@ def show_event(ev, client_lat_ms=None):
 
     def wrap_val(key, text, wrap=60):
         """Print text wrapped at wrap chars; continuation lines are indented."""
+        # Collapse newlines and extra whitespace so they don't corrupt the layout.
+        text = " ".join(text.split())
         parts = [text[i:i+wrap] for i in range(0, max(1, len(text)), wrap)]
         kv(key, dim(parts[0]))
-        indent = " " * (KW + 4)
+        indent = " " * (KW + 2)  # 2 + KW + 2 = same column as value on first line
         for part in parts[1:]:
             print(f"  {indent}{dim(part)}")
 
@@ -289,9 +291,9 @@ def show_event(ev, client_lat_ms=None):
     kv("tokens_out", str(ev.get("tokens_out", "?")))
 
     cost = ev.get("cost", {})
-    kv("cost.input_usd",  str(cost.get("input_usd", 0)))
-    kv("cost.output_usd", str(cost.get("output_usd", 0)))
-    kv("cost.total_usd",  str(cost.get("total_usd", 0)))
+    kv("cost.input_usd",  f"{float(cost.get('input_usd',  0)):.6f}")
+    kv("cost.output_usd", f"{float(cost.get('output_usd', 0)):.6f}")
+    kv("cost.total_usd",  f"{float(cost.get('total_usd',  0)):.6f}")
 
     req = ev.get("request", {})
     kv("request.model", str(req.get("model", "?")))
