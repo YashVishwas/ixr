@@ -123,6 +123,75 @@ def chat_parallel(port, payloads_headers):
         t.join()
     return results
 
+# ── Audit log reader ──────────────────────────────────────────────────────────
+
+LOG_FILE = ""  # set by main() from --log argument
+
+def _log_pos():
+    """Return the current byte size of LOG_FILE (used as a read-start marker)."""
+    if not LOG_FILE:
+        return 0
+    try:
+        return os.path.getsize(LOG_FILE)
+    except OSError:
+        return 0
+
+def _parse_call_events(text):
+    """Extract CallEvent dicts from a chunk of log text (skips non-JSON lines)."""
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            ev = json.loads(line)
+            if isinstance(ev, dict) and "provider" in ev and "tokens_in" in ev:
+                events.append(ev)
+        except json.JSONDecodeError:
+            pass
+    return events
+
+def read_event_after(pos, timeout=2.0):
+    """Return the first CallEvent written to LOG_FILE after byte offset pos."""
+    if not LOG_FILE:
+        return None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if os.path.getsize(LOG_FILE) > pos:
+                with open(LOG_FILE) as f:
+                    f.seek(pos)
+                    events = _parse_call_events(f.read())
+                if events:
+                    return events[0]
+        except OSError:
+            pass
+        time.sleep(0.05)
+    return None
+
+def read_events_after(pos, count, timeout=3.0):
+    """Return up to count CallEvents written to LOG_FILE after byte offset pos."""
+    if not LOG_FILE:
+        return []
+    deadline = time.monotonic() + timeout
+    seen_ids = set()
+    events = []
+    while time.monotonic() < deadline and len(events) < count:
+        try:
+            if os.path.getsize(LOG_FILE) > pos:
+                with open(LOG_FILE) as f:
+                    f.seek(pos)
+                    for ev in _parse_call_events(f.read()):
+                        eid = ev.get("id", id(ev))
+                        if eid not in seen_ids:
+                            seen_ids.add(eid)
+                            events.append(ev)
+        except OSError:
+            pass
+        if len(events) < count:
+            time.sleep(0.1)
+    return events
+
 # ── Display ───────────────────────────────────────────────────────────────────
 
 def hr(char="─", width=60):
@@ -163,6 +232,97 @@ def response_box(label, resp, lat, err, width=56):
         print(f"  |  {dim('')}")
         print(f"  |  {green(model)}  {dim(f'{lat*1000:.0f}ms | in:{t_in} out:{t_out}')}")
     print(bottom)
+
+def show_event(ev, client_lat_ms=None):
+    """
+    Print every field of an ixr CallEvent (from the audit-log plugin).
+
+    Fields displayed:
+      id, timestamp, use_case_id, provider, model,
+      latency_ms (server, raw nanoseconds + converted ms),
+      latency client-side (if provided),
+      tokens_in, tokens_out,
+      cost { input_usd, output_usd, total_usd },
+      request { model, messages[] },
+      response { id, object, created, model, usage{}, choices[] },
+      error (if present)
+    """
+    if ev is None:
+        return
+
+    KW = 26  # visible key-column width (plain chars, before dim() wrapping)
+
+    def kv(key, val):
+        # ljust on the plain string so ANSI codes in val don't affect alignment
+        padded = (key + ":").ljust(KW)
+        print(f"  {dim(padded)}  {val}")
+
+    def wrap_val(key, text, wrap=60):
+        """Print text wrapped at wrap chars; continuation lines are indented."""
+        parts = [text[i:i+wrap] for i in range(0, max(1, len(text)), wrap)]
+        kv(key, dim(parts[0]))
+        indent = " " * (KW + 4)
+        for part in parts[1:]:
+            print(f"  {indent}{dim(part)}")
+
+    print()
+    hr("·")
+    print(f"  {bold(white('ixr event'))}  {dim('audit-log · CallEvent')}")
+    hr("·")
+
+    kv("id",          str(ev.get("id", "?")))
+    kv("timestamp",   str(ev.get("timestamp", "?")))
+    kv("use_case_id", str(ev.get("use_case_id") or "(none)"))
+    kv("provider",    green(str(ev.get("provider", "?"))))
+    kv("model",       bold(str(ev.get("model", "?"))))
+
+    # latency_ms field stores a Go time.Duration (nanoseconds); show both units.
+    lat_raw = ev.get("latency_ms")
+    if isinstance(lat_raw, (int, float)) and lat_raw > 0:
+        kv("latency_ms (server)", f"{lat_raw} ns  {dim(f'({lat_raw / 1_000_000:.1f} ms)')}")
+    else:
+        kv("latency_ms (server)", str(lat_raw))
+    if client_lat_ms is not None:
+        kv("latency (client)",   f"{client_lat_ms:.0f} ms")
+
+    kv("tokens_in",  str(ev.get("tokens_in", "?")))
+    kv("tokens_out", str(ev.get("tokens_out", "?")))
+
+    cost = ev.get("cost", {})
+    kv("cost.input_usd",  str(cost.get("input_usd", 0)))
+    kv("cost.output_usd", str(cost.get("output_usd", 0)))
+    kv("cost.total_usd",  str(cost.get("total_usd", 0)))
+
+    req = ev.get("request", {})
+    kv("request.model", str(req.get("model", "?")))
+    for i, msg in enumerate(req.get("messages", [])):
+        role    = msg.get("role", "?")
+        content = str(msg.get("content") or "")
+        wrap_val(f"request.messages[{i}]", f"[{role}] {content}")
+
+    resp = ev.get("response", {})
+    kv("response.id",      str(resp.get("id", "?")))
+    kv("response.object",  str(resp.get("object", "?")))
+    kv("response.created", str(resp.get("created", "?")))
+    kv("response.model",   str(resp.get("model", "?")))
+
+    usage = resp.get("usage", {})
+    kv("usage.prompt_tokens",     str(usage.get("prompt_tokens", "?")))
+    kv("usage.completion_tokens", str(usage.get("completion_tokens", "?")))
+    kv("usage.total_tokens",      str(usage.get("total_tokens", "?")))
+
+    for choice in resp.get("choices", []):
+        idx     = choice.get("index", 0)
+        msg_c   = choice.get("message", {})
+        content = str(msg_c.get("content") or "")
+        kv(f"choices[{idx}].role",          str(msg_c.get("role", "?")))
+        kv(f"choices[{idx}].finish_reason", str(choice.get("finish_reason", "?")))
+        wrap_val(f"choices[{idx}].content", content)
+
+    if ev.get("error"):
+        kv("error", red(str(ev["error"])))
+
+    hr("·")
 
 # ── Routing decision explainer ────────────────────────────────────────────────
 
@@ -214,11 +374,19 @@ def scenario_routing_transparency(port, providers):
     print(f"  Prompt: {bold(repr(question))}")
     print(f"  Firing {len(calls)} provider(s) in parallel via ixr...\n")
 
+    pos = _log_pos()
     results = chat_parallel(port, calls)
+
+    # Collect all events then match to results by response ID.
+    raw_events = read_events_after(pos, len(results))
+    events_by_id = {ev.get("id", ""): ev for ev in raw_events}
+
     for (_, m, pname, mshort, free), (resp, lat, err) in zip(providers, results):
         tier = green("free") if free else yellow("paid")
         label = f"{pname}/{mshort} [{tier}]"
         response_box(label, resp, lat, err)
+        ev = events_by_id.get((resp or {}).get("id", "")) if resp else None
+        show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
     print()
     note("Your application sent ONE type of request. ixr handled all provider")
@@ -251,6 +419,7 @@ def scenario_auto_routing(port):
         print()
 
         if winner:
+            pos = _log_pos()
             resp, lat, err = chat(port, {
                 "model": "auto",
                 "messages": [{"role": "user", "content": f"What is {task}? One sentence."}],
@@ -267,6 +436,8 @@ def scenario_auto_routing(port):
                 content = resp["choices"][0]["message"]["content"] if resp and resp.get("choices") else ""
                 print(f"     {green('Response via')} {bold(model_used)}  {dim(f'({lat*1000:.0f}ms)')}")
                 print(f"     {dim(content[:120])}")
+                ev = read_event_after(pos)
+                show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
             print()
 
 
@@ -284,12 +455,15 @@ def scenario_shadow(port, primary, shadow):
     print(f"  Primary: {bold(ppname + '/' + pmshort)}")
     print(f"  Shadow:  {bold(spname + '/' + smshort)} (async, not blocking caller)\n")
 
+    pos = _log_pos()
     resp, lat, err = chat(port, {
         "model": pm,
         "messages": [{"role": "user", "content": question}],
     }, extra_headers={"X-IXR-Shadow-Model": sm})
 
     response_box(f"PRIMARY  {ppname}/{pmshort}", resp, lat, err)
+    ev = read_event_after(pos)
+    show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
     print()
     print(f"  {yellow('Shadow call fired in background.')} ixr published:")
@@ -309,16 +483,21 @@ def scenario_semantic_cache(port, provider_entry):
     print(f"  Prompt: {bold(repr(question))}\n")
 
     # First call — cache miss.
+    pos1 = _log_pos()
     resp1, lat1, err1 = chat(port, payload)
-    cache_status1 = "MISS (first call — cache cold)"
-    print(f"  {bold('Call 1')}  {dim(cache_status1)}")
+    print(f"  {bold('Call 1')}  {dim('MISS (first call — cache cold)')}")
     response_box(f"{pname}/{mshort}", resp1, lat1, err1)
+    ev1 = read_event_after(pos1)
+    show_event(ev1, client_lat_ms=lat1 * 1000 if lat1 is not None else None)
 
     # Second call — should hit.
+    pos2 = _log_pos()
     resp2, lat2, err2 = chat(port, payload)
     speedup = f"  {green(f'{lat1/lat2:.1f}x faster')}" if resp1 and resp2 and lat2 > 0 else ""
     print(f"\n  {bold('Call 2')}  {dim('HIT expected — served from in-memory cache')}{speedup}")
     response_box(f"{pname}/{mshort} [cached]", resp2, lat2, err2)
+    ev2 = read_event_after(pos2)
+    show_event(ev2, client_lat_ms=lat2 * 1000 if lat2 is not None else None)
 
     print()
     note("Cache is keyed on model + message content. Streaming requests bypass it.")
@@ -353,12 +532,13 @@ def scenario_observability(port):
     note("Every request gets an X-Request-ID and an OTEL trace span.")
     note("Prometheus metrics are exposed on GET /metrics.\n")
 
-    # Show a request ID being echoed back.
-    _, _, pname, mshort, _ = (None, None, "demo", "demo", False)
+    # Show a request ID being echoed back, and capture the full event.
     try:
         providers_local = detect_providers()
         if providers_local:
             _, model, pname, mshort, _ = providers_local[0]
+            pos = _log_pos()
+            t0 = time.monotonic()
             req = urllib.request.Request(
                 f"http://localhost:{port}/v1/chat/completions",
                 data=json.dumps({"model": model,
@@ -367,8 +547,11 @@ def scenario_observability(port):
             )
             req.add_header("Content-Type", "application/json")
             with urllib.request.urlopen(req, timeout=15) as r:
+                lat = time.monotonic() - t0
                 req_id = r.headers.get("X-Request-ID", "(not present)")
             print(f"  {bold('X-Request-ID')} returned: {cyan(req_id)}")
+            ev = read_event_after(pos)
+            show_event(ev, client_lat_ms=lat * 1000)
     except Exception:
         pass
 
@@ -468,11 +651,14 @@ def interactive_chat(port, providers, has_shadow):
 
         if mode == "1":
             print(f"  {dim('Routing: direct -> ' + ppname + '/' + pmshort)}")
+            pos = _log_pos()
             resp, lat, err = chat(port, {
                 "model": pm,
                 "messages": [{"role": "user", "content": question}],
             }, extra_headers={"X-IXR-UseCase": "demo-interactive"})
             response_box(f"{ppname}/{pmshort}", resp, lat, err)
+            ev = read_event_after(pos)
+            show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
         elif mode == "2":
             tasks = ["general", "reasoning", "coding", "math", "multilingual"]
@@ -490,6 +676,7 @@ def interactive_chat(port, providers, has_shadow):
             if winner:
                 print(f"  {dim('ixr scoring -> selected:')} {bold(winner[0])}  "
                       f"{dim(f'(score={winner[1]:.2f}, ${winner[2]:.2f}/1M)')}")
+            pos = _log_pos()
             resp, lat, err = chat(port, {
                 "model": "auto",
                 "messages": [{"role": "user", "content": question}],
@@ -501,6 +688,8 @@ def interactive_chat(port, providers, has_shadow):
             response_box(label, resp, lat, err)
             if err and "no provider" in (err or ""):
                 note(f"Catalog chose '{winner[0] if winner else '?'}' but that provider key isn't set.")
+            ev = read_event_after(pos)
+            show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
         elif mode == "3":
             if not secondary:
@@ -509,29 +698,44 @@ def interactive_chat(port, providers, has_shadow):
                 _, sm, spname, smshort, _ = secondary
                 print(f"  {dim('Firing')} {bold(ppname + '/' + pmshort)} {dim('and')} "
                       f"{bold(spname + '/' + smshort)} {dim('in parallel...')}")
+                pos = _log_pos()
                 results = chat_parallel(port, [
                     ({"model": pm, "messages": [{"role": "user", "content": question}]}, {}),
                     ({"model": sm, "messages": [{"role": "user", "content": question}]}, {}),
                 ])
+                raw_events = read_events_after(pos, 2)
+                events_by_id = {ev.get("id", ""): ev for ev in raw_events}
+
                 response_box(f"{ppname}/{pmshort}", *results[0])
+                ev0 = events_by_id.get((results[0][0] or {}).get("id", "")) if results[0][0] else None
+                show_event(ev0, client_lat_ms=results[0][1] * 1000 if results[0][1] is not None else None)
+
                 response_box(f"{spname}/{smshort}", *results[1])
+                ev1 = events_by_id.get((results[1][0] or {}).get("id", "")) if results[1][0] else None
+                show_event(ev1, client_lat_ms=results[1][1] * 1000 if results[1][1] is not None else None)
 
         print()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global LOG_FILE
+
     p = argparse.ArgumentParser()
     p.add_argument("--port",   type=int, default=8081)
     p.add_argument("--branch", default="phase-2_3")
     p.add_argument("--log",    default="")
     args = p.parse_args()
 
+    LOG_FILE = args.log
+
     features  = features_for(args.branch)
     providers = detect_providers()
 
     print()
     print(f"  {bold('ixr demo')}  |  branch: {cyan(args.branch)}  |  port: {args.port}")
+    if LOG_FILE:
+        print(f"  {dim('event log:')} {LOG_FILE}")
     print()
 
     if not providers:
@@ -570,7 +774,7 @@ def main():
     # Interactive
     interactive_chat(args.port, providers, "shadow_routing" in features)
 
-    print(f"\n  {green('Done.')}  Server log: {args.log or 'see demo.sh output'}\n")
+    print(f"\n  {green('Done.')}  Server log: {LOG_FILE or 'see demo.sh output'}\n")
 
 
 if __name__ == "__main__":
