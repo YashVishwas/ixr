@@ -726,7 +726,7 @@ def main():
 
     p = argparse.ArgumentParser()
     p.add_argument("--port",   type=int, default=8081)
-    p.add_argument("--branch", default="phase-2_3")
+    p.add_argument("--branch", default="main")
     p.add_argument("--log",    default="")
     args = p.parse_args()
 

@@ -80,16 +80,16 @@ select_branch() {
     i=$((i+1))
   done
   echo ""
-  printf "  Enter number [default: phase-2_3]: "
+  printf "  Enter number [default: main]: "
   read -r choice
   choice="${choice:-}"
 
   if [[ -z "$choice" ]]; then
-    BRANCH="phase-2_3"
+    BRANCH="main"
   elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#branches[@]}" ]]; then
     BRANCH="${branches[$((choice-1))]}"
   else
-    BRANCH="phase-2_3"
+    BRANCH="main"
   fi
 }
 
