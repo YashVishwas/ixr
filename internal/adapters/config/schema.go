@@ -10,6 +10,14 @@ type Config struct {
 	Tenants   map[string]TenantConfig   `yaml:"tenants"`
 	Secrets   SecretsConfig             `yaml:"secrets"`
 	LogLevel  string                    `yaml:"log_level"`
+	Chains    map[string]ChainDef       `yaml:"chains,omitempty"`
+}
+
+// ChainDef describes a named multi-model pipeline declared in ixr.yaml.
+// Invoke it at request time with the header X-IXR-Chain: <name>.
+type ChainDef struct {
+	Models  []string `yaml:"models"`
+	Prompts []string `yaml:"prompts,omitempty"`
 }
 
 // ServerConfig holds HTTP server settings.

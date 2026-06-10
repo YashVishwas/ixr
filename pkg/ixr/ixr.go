@@ -21,6 +21,8 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
 	cfgloader "github.com/YashVishwas/ixr/internal/adapters/config"
 	"github.com/YashVishwas/ixr/internal/adapters/pluginmgr"
+	"github.com/YashVishwas/ixr/internal/domain/chain"
+	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/anthropic"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/cerebras"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/deepseek"
@@ -63,7 +65,7 @@ func Start(opts ...Option) error {
 		o(cfg)
 	}
 
-	registry, port, err := buildRegistry(cfg)
+	registry, port, fileCfg, err := buildRegistry(cfg)
 	if err != nil {
 		return err
 	}
@@ -177,8 +179,15 @@ func Start(opts ...Option) error {
 	mgr := pluginmgr.New(memBus)
 	mgr.Register(&auditlog.Plugin{})
 
+	chainExec := chain.NewExecutor(router, routing.Route, memBus)
+
+	var chains map[string]cfgloader.ChainDef
+	if fileCfg != nil {
+		chains = fileCfg.Chains
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/chat/completions", ingress.NewChatHandler(router, memBus))
+	mux.Handle("POST /v1/chat/completions", ingress.NewChatHandler(router, memBus, chainExec, chains))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -188,8 +197,8 @@ func Start(opts ...Option) error {
 	return ingress.NewServer(port, mux).Run(ctx)
 }
 
-// buildRegistry constructs the provider map and effective port from config file or env vars.
-func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
+// buildRegistry constructs the provider map, effective port, and loaded config from a config file or env vars.
+func buildRegistry(cfg *config) (map[string]provider.Provider, int, *cfgloader.Config, error) {
 	// Try config file first: explicit path → auto-discover → fall back to env.
 	var fileCfg *cfgloader.Config
 	var err error
@@ -197,12 +206,12 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	if cfg.configFile != "" {
 		fileCfg, err = cfgloader.Load(cfg.configFile)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 	} else {
 		fileCfg, err = cfgloader.Discover()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 	}
 
@@ -308,8 +317,8 @@ func buildRegistry(cfg *config) (map[string]provider.Provider, int, error) {
 	}
 
 	if len(registry) == 0 {
-		return nil, 0, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
+		return nil, 0, nil, fmt.Errorf("ixr: no providers configured — set API keys (e.g. OPENAI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY) or provide ixr.yaml")
 	}
 
-	return registry, port, nil
+	return registry, port, fileCfg, nil
 }

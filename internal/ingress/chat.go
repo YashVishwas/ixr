@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/adapters/config"
+	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/pkg/bus"
@@ -28,14 +30,18 @@ type Router func(model string) (provider.Provider, error)
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
-	router Router
-	bus    bus.Bus
+	router    Router
+	bus       bus.Bus
+	chainExec *chain.Executor
+	chains    map[string]config.ChainDef
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
 // Pass a non-nil bus to emit CallEvents after each request.
-func NewChatHandler(router Router, b bus.Bus) *ChatHandler {
-	return &ChatHandler{router: router, bus: b}
+// chainExec and chains enable multi-model chaining via X-IXR-Chain; both may be nil
+// to run without chain support.
+func NewChatHandler(router Router, b bus.Bus, chainExec *chain.Executor, chains map[string]config.ChainDef) *ChatHandler {
+	return &ChatHandler{router: router, bus: b, chainExec: chainExec, chains: chains}
 }
 
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -61,52 +67,79 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Model == "auto" {
-		hint := taskHintFromHeaders(r, &req)
-		resolved := routing.Route(hint)
-		if resolved == "" {
-			writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+	hint := taskHintFromHeaders(r, &req)
+	useCaseID := r.Header.Get("X-IXR-UseCase")
+
+	var resp *schema.ResponseEnvelope
+	var err error
+
+	chainHeader := strings.TrimSpace(r.Header.Get("X-IXR-Chain"))
+	if chainHeader != "" && h.chainExec != nil {
+		// ── Multi-model chain path ────────────────────────────────────────────
+		stages, resolveErr := chain.Resolve(chainHeader, h.chains)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_chain", resolveErr.Error())
 			return
 		}
-		req.Model = resolved
-	}
-
-	p, err := h.router(req.Model)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "no_provider", err.Error())
-		return
-	}
-
-	start := time.Now()
-	resp, err := p.Chat(r.Context(), &req)
-	latency := time.Since(start)
-
-	if h.bus != nil {
-		ev := &schema.CallEvent{
-			Timestamp: start,
-			Provider:  p.Name(),
-			Model:     req.Model,
-			LatencyMS: latency.Milliseconds(),
-			Request:   req,
-			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+		// Use the request model as the chain ID anchor; fall back to a timestamp.
+		chainID := req.Model
+		if chainID == "" || chainID == "auto" {
+			chainID = time.Now().Format("20060102150405.000000000")
 		}
+		resp, err = h.chainExec.Run(r.Context(), chainID, chainHeader, stages, &req, useCaseID, hint)
 		if err != nil {
-			ev.Error = err.Error()
-		} else {
-			ev.ID = resp.ID
-			ev.TokensIn = resp.Usage.PromptTokens
-			ev.TokensOut = resp.Usage.CompletionTokens
-			ev.Response = *resp
+			slog.Error("chain error", "chain", chainHeader, "err", err)
+			writeError(w, http.StatusBadGateway, "chain_error", err.Error())
+			return
 		}
-		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
-			slog.Warn("bus publish error", "err", pubErr)
+	} else {
+		// ── Single-model path (unchanged) ─────────────────────────────────────
+		if req.Model == "auto" {
+			resolved := routing.Route(hint)
+			if resolved == "" {
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+				return
+			}
+			req.Model = resolved
 		}
-	}
 
-	if err != nil {
-		slog.Error("provider error", "provider", p.Name(), "model", req.Model, "err", err)
-		writeError(w, http.StatusBadGateway, "provider_error", "upstream provider returned an error")
-		return
+		p, routeErr := h.router(req.Model)
+		if routeErr != nil {
+			writeError(w, http.StatusBadRequest, "no_provider", routeErr.Error())
+			return
+		}
+
+		start := time.Now()
+		resp, err = p.Chat(r.Context(), &req)
+		latency := time.Since(start)
+
+		if h.bus != nil {
+			ev := &schema.CallEvent{
+				Timestamp: start,
+				Provider:  p.Name(),
+				Model:     req.Model,
+				LatencyMS: latency.Milliseconds(),
+				Request:   req,
+				UseCaseID: useCaseID,
+			}
+			if err != nil {
+				ev.Error = err.Error()
+			} else {
+				ev.ID = resp.ID
+				ev.TokensIn = resp.Usage.PromptTokens
+				ev.TokensOut = resp.Usage.CompletionTokens
+				ev.Response = *resp
+			}
+			if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
+				slog.Warn("bus publish error", "err", pubErr)
+			}
+		}
+
+		if err != nil {
+			slog.Error("provider error", "provider", p.Name(), "model", req.Model, "err", err)
+			writeError(w, http.StatusBadGateway, "provider_error", "upstream provider returned an error")
+			return
+		}
 	}
 
 	h.maybeRunShadow(r, req, resp)

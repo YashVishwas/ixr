@@ -32,3 +32,39 @@ providers:
     api_key: ${GITHUB_TOKEN}
   zhipu:
     api_key: ${ZHIPU_API_KEY}
+
+# ── Multi-model chains ────────────────────────────────────────────────────────
+# Invoke via header:  X-IXR-Chain: <chain-name>
+# Inline (no config): X-IXR-Chain: qwen3-8b,claude-sonnet-4-6
+#
+# Each stage receives the full conversation history including every prior
+# stage's response, so later models can address gaps or uncertainties.
+chains:
+  # smart-qa: free fast model answers first; Claude reviews and refines.
+  smart-qa:
+    models:
+      - auto                     # ixr picks the specialist based on X-IXR-Task
+      - claude-sonnet-4-6        # reviewer / synthesizer
+    prompts:
+      - ""
+      - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
+
+  # fast-refine: two free models; Cerebras drafts, Groq/Llama refines.
+  fast-refine:
+    models:
+      - qwen3-8b
+      - llama-3.1-8b-instant
+    prompts:
+      - ""
+      - "Improve the previous answer: fix any inaccuracies and make it more concise."
+
+  # debate: three models tackle the same question and the last synthesizes.
+  debate:
+    models:
+      - qwen3-8b
+      - mistral-small-latest
+      - claude-sonnet-4-6
+    prompts:
+      - ""
+      - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
+      - "Synthesize the two perspectives above into the best possible answer."

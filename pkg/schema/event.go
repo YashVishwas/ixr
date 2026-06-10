@@ -20,6 +20,7 @@ type CallEvent struct {
 	Response  ResponseEnvelope `json:"response"`
 	Error     string           `json:"error,omitempty"`
 	Shadow    *ShadowMetadata  `json:"shadow,omitempty"`
+	Chain     *ChainMeta       `json:"chain,omitempty"`
 }
 
 // ShadowMetadata identifies events produced by shadow routing. Shadow responses
@@ -28,6 +29,15 @@ type ShadowMetadata struct {
 	PrimaryID    string `json:"primary_id,omitempty"`
 	PrimaryModel string `json:"primary_model,omitempty"`
 	ShadowModel  string `json:"shadow_model,omitempty"`
+}
+
+// ChainMeta is attached to each CallEvent that is part of a multi-model chain.
+// It lets consumers correlate all stages of a single chain invocation.
+type ChainMeta struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Stage       int    `json:"stage"`
+	TotalStages int    `json:"total_stages"`
 }
 
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.
