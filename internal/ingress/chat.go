@@ -1,6 +1,7 @@
 package ingress
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
+
+// headerShadowModel is the request header that triggers inline shadow routing.
+const headerShadowModel = "X-IXR-Shadow-Model"
 
 // Router picks a provider for a given model name.
 type Router func(model string) (provider.Provider, error)
@@ -137,6 +141,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error", "err", pubErr)
 		}
+
+		if shadowModel := r.Header.Get(headerShadowModel); shadowModel != "" && shadowModel != req.Model {
+			primaryID := ""
+			if resp != nil {
+				primaryID = resp.ID
+			}
+			go h.runShadow(r, primaryID, req.Model, shadowModel, &req)
+		}
 	}
 
 	if err != nil {
@@ -203,6 +215,49 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	if streamErr != nil {
 		slog.Error("stream error", "provider", p.Name(), "model", req.Model, "err", streamErr)
 	}
+}
+
+func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadowModel string, req *schema.RequestEnvelope) {
+	ctx := context.Background()
+	shadowReq := *req
+	shadowReq.Model = shadowModel
+
+	meta := &schema.ShadowMetadata{
+		PrimaryID:    primaryID,
+		PrimaryModel: primaryModel,
+		ShadowModel:  shadowModel,
+	}
+	id := identity.FromContext(r.Context())
+	start := time.Now()
+	ev := &schema.CallEvent{
+		Timestamp: start,
+		Model:     shadowModel,
+		UseCaseID: r.Header.Get("X-IXR-UseCase"),
+		TenantID:  id.TenantID,
+		Request:   shadowReq,
+		Shadow:    meta,
+	}
+
+	sp, err := h.router(shadowModel)
+	if err != nil {
+		ev.Error = err.Error()
+		ev.Latency = time.Since(start)
+		_ = h.bus.Publish(ctx, ev)
+		return
+	}
+	ev.Provider = sp.Name()
+
+	resp, err := sp.Chat(ctx, &shadowReq)
+	ev.Latency = time.Since(start)
+	if err != nil {
+		ev.Error = err.Error()
+	} else {
+		ev.ID = resp.ID
+		ev.TokensIn = resp.Usage.PromptTokens
+		ev.TokensOut = resp.Usage.CompletionTokens
+		ev.Response = *resp
+	}
+	_ = h.bus.Publish(ctx, ev)
 }
 
 func promptCharsFromMessages(req *schema.RequestEnvelope) int {

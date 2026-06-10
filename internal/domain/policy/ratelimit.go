@@ -12,6 +12,13 @@ import (
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
+// RateLimit is a per-tenant rate limit configuration.
+type RateLimit struct {
+	WindowSec   int
+	MaxRequests int
+	MaxTokens   int
+}
+
 // Decision is the result of a rate limit check.
 type Decision struct {
 	Allowed    bool

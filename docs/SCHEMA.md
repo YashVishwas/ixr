@@ -22,6 +22,17 @@ type CallEvent struct {
     Request   RequestEnvelope
     Response  ResponseEnvelope
     Error     string           // empty on success
+    Shadow    *ShadowMetadata  // set only for shadow-routing events
+}
+```
+
+`ShadowMetadata` links a shadow event back to the primary call:
+
+```go
+type ShadowMetadata struct {
+    PrimaryID    string
+    PrimaryModel string
+    ShadowModel  string
 }
 ```
 
@@ -31,7 +42,8 @@ ixr's canonical chat request and response, shaped to match the OpenAI format so 
 
 ## TelemetryRecord
 
-Extended record written by the telemetry plugin. Adds routing metadata (intent, fallback info) for the scoring engine.
+Extended record written by the telemetry plugin. Adds routing metadata (intent,
+fallback info, shadow markers) for the scoring engine.
 
 ## Versioning policy
 

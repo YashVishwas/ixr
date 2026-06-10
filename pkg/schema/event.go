@@ -21,6 +21,14 @@ type CallEvent struct {
 	Response  ResponseEnvelope `json:"response"`
 	Error     string           `json:"error,omitempty"`
 	Streaming bool             `json:"streaming,omitempty"`
+	Shadow    *ShadowMetadata  `json:"shadow,omitempty"`
+}
+
+// ShadowMetadata is attached to CallEvents emitted for shadow-routed requests.
+type ShadowMetadata struct {
+	PrimaryID    string `json:"primary_id,omitempty"`
+	PrimaryModel string `json:"primary_model,omitempty"`
+	ShadowModel  string `json:"shadow_model,omitempty"`
 }
 
 // DeltaChunk is one streaming delta for stream-mode CallEvents on the bus.

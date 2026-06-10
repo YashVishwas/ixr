@@ -41,4 +41,15 @@ shadow flow:  call → primary model → response to caller (unchanged)
                    → shadow model  → response stored (not sent) → compare offline
 ```
 
-Shadow routing is opt-in per use-case, configured via the policy store.
+Shadow routing is opt-in. Until the policy store is wired into ingress, callers
+can enable a single shadow model per request with:
+
+```http
+X-IXR-Shadow-Model: claude-3-5-sonnet
+X-IXR-Shadow-Timeout-MS: 30000
+```
+
+The primary response is returned unchanged. The shadow call runs asynchronously
+with its own timeout and emits a `CallEvent` with `Shadow` metadata for
+telemetry/offline comparison. Shadow routing errors are published on that event
+and never fail the caller's primary request.
