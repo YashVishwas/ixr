@@ -80,11 +80,15 @@ select_branch() {
     i=$((i+1))
   done
   echo ""
-  printf "  Enter number [default: main]: "
+  printf "  Enter number [default: main, q to quit]: "
   read -r choice
   choice="${choice:-}"
 
-  if [[ -z "$choice" ]]; then
+  if [[ "$choice" == "q" || "$choice" == "Q" || "$choice" == "quit" ]]; then
+    echo ""
+    echo "  $(green 'Bye.')"
+    exit 0
+  elif [[ -z "$choice" ]]; then
     BRANCH="main"
   elif [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#branches[@]}" ]]; then
     BRANCH="${branches[$((choice-1))]}"
