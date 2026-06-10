@@ -1,33 +1,47 @@
 package routing
 
-import "testing"
+import (
+	"testing"
+	"time"
 
-func TestFilterCandidatesAppliesConstraintsAndCircuit(t *testing.T) {
-	candidates := []Candidate{
-		{Provider: "p", Model: "cheap"},
-		{Provider: "p", Model: "slow"},
-		{Provider: "p", Model: "open"},
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/pkg/store"
+)
+
+func TestFilterAppliesCostCapAndCircuit(t *testing.T) {
+	models := []ModelCard{
+		{ID: "cheap", InputUSDPer1M: 0.5, OutputUSDPer1M: 0.5},
+		{ID: "expensive", InputUSDPer1M: 10, OutputUSDPer1M: 30},
+		{ID: "tripped", InputUSDPer1M: 0.5, OutputUSDPer1M: 0.5},
 	}
-	stats := map[string]ModelStats{
-		"cheap": {CostUSDPer1M: 0.5, P95LatencyMS: 100, SuccessRate: 0.99},
-		"slow":  {CostUSDPer1M: 0.4, P95LatencyMS: 2000, SuccessRate: 0.99},
-		"open":  {CostUSDPer1M: 0.4, P95LatencyMS: 100, CircuitOpen: true},
+	// One failure with MinRequests=1 trips the circuit open.
+	p := circuitbreaker.Policy{
+		SuccessRateThreshold: 0.99,
+		WindowDuration:       time.Minute,
+		MinRequests:          1,
+		HalfOpenAfter:        time.Hour,
+		ProbeCount:           1,
 	}
-	got := FilterCandidates(candidates, stats, Constraints{MaxCostUSDPer1M: 1, MaxLatencyMS: 500})
-	if len(got) != 1 || got[0].Model != "cheap" {
-		t.Fatalf("filtered: got %+v", got)
+	cb := circuitbreaker.NewRegistry(p)
+	cb.RecordOutcome("tripped", false)
+
+	hint := TaskHint{MaxCostUSDPer1M: 1}
+	got := Filter(models, hint, cb)
+	if len(got) != 1 || got[0].ID != "cheap" {
+		t.Fatalf("filter: got %+v", got)
 	}
 }
 
-func TestScoreCandidatesSortsLowestScoreFirst(t *testing.T) {
-	candidates := []Candidate{{Model: "a"}, {Model: "b"}}
-	stats := map[string]ModelStats{
-		"a": {CostUSDPer1M: 1, P50LatencyMS: 100, SuccessRate: 0.99},
-		"b": {CostUSDPer1M: 5, P50LatencyMS: 500, SuccessRate: 0.90},
-	}
-	got := ScoreCandidates(candidates, stats, Weights{Cost: 0.4, Latency: 0.4, Reliability: 0.2})
-	if got[0].Model != "a" {
-		t.Fatalf("best: got %q, want a; all=%+v", got[0].Model, got)
+func TestScoreRanksModelByUtility(t *testing.T) {
+	cheap := ModelCard{ID: "cheap", InputUSDPer1M: 0.5, OutputUSDPer1M: 0.5, LatencySec: 0.2, FailureRate: 0.01}
+	costly := ModelCard{ID: "costly", InputUSDPer1M: 10, OutputUSDPer1M: 30, LatencySec: 2.0, FailureRate: 0.05}
+	hint := TaskHint{}
+	weights := [3]float64{0.4, 0.4, 0.2}
+	inputShare := 0.45
+	scoreA := Score(cheap, hint, store.ModelStats{}, weights, inputShare)
+	scoreB := Score(costly, hint, store.ModelStats{}, weights, inputShare)
+	if scoreA <= scoreB {
+		t.Fatalf("cheap (%v) should score higher than costly (%v)", scoreA, scoreB)
 	}
 }
 

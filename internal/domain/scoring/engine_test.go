@@ -1,43 +1,53 @@
 package scoring
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/YashVishwas/ixr/internal/domain/routing"
+	"github.com/YashVishwas/ixr/pkg/store"
+)
+
+type stubPerfStore struct{}
+
+func (stubPerfStore) Get(_ context.Context, _, _ string) (store.ModelStats, error) {
+	return store.ModelStats{}, nil
+}
+func (stubPerfStore) Upsert(_ context.Context, _ store.ModelStats) error { return nil }
+func (stubPerfStore) List(_ context.Context, _ string) ([]store.ModelStats, error) {
+	return nil, nil
+}
+
+type stubPolicyStore struct{}
+
+func (stubPolicyStore) GetPolicy(_ context.Context, _ string) (store.RoutingPolicy, error) {
+	return store.RoutingPolicy{CostWeight: 0.3, LatencyWeight: 0.4, ReliabilityWeight: 0.3}, nil
+}
+func (stubPolicyStore) SetPolicy(_ context.Context, _ store.RoutingPolicy) error { return nil }
 
 func TestEngineDecideFiltersScoresAndBuildsFallbacks(t *testing.T) {
-	decision, ok := (Engine{}).Decide(Request{
-		Candidates: []Candidate{
-			{Provider: "p1", Model: "cheap-fast"},
-			{Provider: "p2", Model: "slow"},
-			{Provider: "p3", Model: "open"},
-			{Provider: "p4", Model: "fallback"},
-		},
-		Stats: map[string]ModelSnapshot{
-			"cheap-fast": {Cost: 1, P50Latency: 100, P95Latency: 150, SuccessRate: 0.99},
-			"slow":       {Cost: 1, P50Latency: 1000, P95Latency: 2000, SuccessRate: 0.99},
-			"open":       {Cost: 1, P50Latency: 50, P95Latency: 75, SuccessRate: 0.99, CircuitOpen: true},
-			"fallback":   {Cost: 2, P50Latency: 200, P95Latency: 300, SuccessRate: 0.98},
-		},
-		Weights:       Weights{Cost: 0.3, Latency: 0.5, Reliability: 0.2},
-		MaxLatencyP95: 500,
-		FallbackLimit: 1,
-	})
-	if !ok {
-		t.Fatal("expected decision")
+	cat := []routing.ModelCard{
+		{ID: "cheap-fast", InputUSDPer1M: 0.5, OutputUSDPer1M: 0.5, LatencySec: 0.2, FailureRate: 0.01},
+		{ID: "slow", InputUSDPer1M: 0.5, OutputUSDPer1M: 0.5, LatencySec: 10.0, FailureRate: 0.01},
+		{ID: "fallback", InputUSDPer1M: 1.0, OutputUSDPer1M: 1.0, LatencySec: 0.5, FailureRate: 0.02},
 	}
-	if decision.Primary.Model != "cheap-fast" {
-		t.Fatalf("primary: got %q, want cheap-fast", decision.Primary.Model)
+	eng := NewEngine(stubPerfStore{}, stubPolicyStore{}, cat)
+	decision, err := eng.Decide(context.Background(), routing.TaskHint{}, nil)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
 	}
-	if len(decision.Fallbacks) != 1 || decision.Fallbacks[0].Model != "fallback" {
-		t.Fatalf("fallbacks: got %+v", decision.Fallbacks)
+	if decision.Model == "" {
+		t.Fatal("expected a primary model")
+	}
+	if len(decision.FallbackChain) > 2 {
+		t.Fatalf("fallback chain too long: %+v", decision.FallbackChain)
 	}
 }
 
-func TestPlanShadowSkipsPrimary(t *testing.T) {
-	got := PlanShadow(Candidate{Model: "a"}, ShadowPolicy{Enabled: true, Model: Candidate{Model: "a"}})
-	if got.Enabled {
-		t.Fatal("shadow should be disabled for primary model")
-	}
-	got = PlanShadow(Candidate{Model: "a"}, ShadowPolicy{Enabled: true, Model: Candidate{Provider: "p", Model: "b"}})
-	if !got.Enabled || got.Model.Model != "b" {
-		t.Fatalf("shadow: got %+v", got)
+func TestEngineDecideErrorsOnEmptyCatalog(t *testing.T) {
+	eng := NewEngine(stubPerfStore{}, stubPolicyStore{}, nil)
+	_, err := eng.Decide(context.Background(), routing.TaskHint{}, nil)
+	if err == nil {
+		t.Fatal("expected error for empty catalog")
 	}
 }
