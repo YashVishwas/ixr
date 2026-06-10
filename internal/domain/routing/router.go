@@ -237,15 +237,37 @@ func capabilityMatch(m ModelCard, hint TaskHint) float64 {
 	return clamp01(score / sum)
 }
 
+// Catalog returns a copy of the default model catalog.
+func Catalog() []ModelCard {
+	out := make([]ModelCard, len(catalog))
+	copy(out, catalog)
+	return out
+}
+
+// InputShare converts a prompt character count to the estimated fraction of tokens
+// that are input (vs. output). Used for blended cost calculations.
+func InputShare(promptChars int) float64 {
+	return estimateInputShare(promptChars)
+}
+
 // Route selects the single best catalog model for the given hint.
 // It returns "" when no model satisfies a positive MaxCostUSDPer1M cap.
 func Route(hint TaskHint) string {
-	costs := make([]float64, len(catalog))
-	latencies := make([]float64, len(catalog))
+	picks := scoreAll(hint, catalog)
+	if len(picks) == 0 {
+		return ""
+	}
+	return picks[0].Model
+}
 
+// scoreAll scores every model in models against hint and returns candidates sorted
+// by descending utility (best first). Models that violate the cost cap are excluded.
+func scoreAll(hint TaskHint, models []ModelCard) []Candidate {
 	inputShare := estimateInputShare(hint.PromptChars)
 
-	for i, m := range catalog {
+	costs := make([]float64, len(models))
+	latencies := make([]float64, len(models))
+	for i, m := range models {
 		costs[i] = blendedCost(m, inputShare)
 		latencies[i] = m.LatencySec
 	}
@@ -258,44 +280,24 @@ func Route(hint TaskHint) string {
 		latencyWeight *= 1.5
 	}
 
-	type scored struct {
-		modelID string
-		utility float64
-	}
-	var picks []scored
-
-	for i, m := range catalog {
+	var picks []Candidate
+	for i, m := range models {
 		cost := costs[i]
-
 		if hint.MaxCostUSDPer1M > 0 && cost > hint.MaxCostUSDPer1M {
 			continue
 		}
-
 		normCost := normalizeMinMax(cost, minCost, maxCost)
 		normLat := normalizeMinMax(m.LatencySec, minLat, maxLat)
-
 		capability := capabilityMatch(m, hint)
-
-		costPenalty := wCost * normCost
-		latencyPenalty := latencyWeight * normLat
-		failurePenalty := wFailure * m.FailureRate
-
-		utility :=
-			wCapability*capability -
-				costPenalty -
-				latencyPenalty -
-				failurePenalty
-
-		picks = append(picks, scored{modelID: m.ID, utility: utility})
-	}
-
-	if len(picks) == 0 {
-		return ""
+		utility := wCapability*capability -
+			wCost*normCost -
+			latencyWeight*normLat -
+			wFailure*m.FailureRate
+		picks = append(picks, Candidate{Model: m.ID, Score: utility})
 	}
 
 	sort.Slice(picks, func(i, j int) bool {
-		return picks[i].utility > picks[j].utility
+		return picks[i].Score > picks[j].Score
 	})
-
-	return picks[0].modelID
+	return picks
 }

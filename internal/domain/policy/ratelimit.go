@@ -1,145 +1,155 @@
 // Package policy handles rate limit decisions and quota checks.
-// Dimensions: use-case-id, model-id, user-id, tenant-id.
 // Sliding window, token-based and request-based. 429 with Retry-After on limit.
 package policy
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
+
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
-// LimitKey identifies the quota bucket for a request.
-type LimitKey struct {
-	TenantID  string
-	UserID    string
-	UseCaseID string
-	ModelID   string
-}
-
-// RateLimit defines request and token ceilings over a sliding window.
+// RateLimit is a per-tenant rate limit configuration.
 type RateLimit struct {
-	Window      time.Duration
+	WindowSec   int
 	MaxRequests int
 	MaxTokens   int
 }
 
-// Decision is the result of evaluating a quota request.
+// Decision is the result of a rate limit check.
 type Decision struct {
 	Allowed    bool
 	RetryAfter time.Duration
-	Reason     string
-	Remaining  Remaining
+	Remaining  int
 }
 
-// Remaining reports quota left after an allowed request.
-type Remaining struct {
-	Requests int
-	Tokens   int
+// RateLimiter enforces sliding-window request and token limits.
+type RateLimiter interface {
+	Check(ctx context.Context, id schema.Identity, tokenCost int) Decision
+	Record(ctx context.Context, id schema.Identity, tokensUsed int)
+	Reload(cfg RateLimit)
 }
 
-type usageEvent struct {
+type windowEntry struct {
 	at     time.Time
 	tokens int
 }
 
-// SlidingWindowLimiter is an in-memory rate limiter suitable for single-process
-// deployments and tests. Distributed deployments should back this interface with Redis.
-type SlidingWindowLimiter struct {
-	mu     sync.Mutex
-	events map[LimitKey][]usageEvent
-	now    func() time.Time
+type slidingWindow struct {
+	entries []windowEntry
 }
 
-// NewSlidingWindowLimiter creates an empty limiter.
-func NewSlidingWindowLimiter() *SlidingWindowLimiter {
-	return &SlidingWindowLimiter{
-		events: map[LimitKey][]usageEvent{},
-		now:    func() time.Time { return time.Now().UTC() },
+// MemoryRateLimiter is the in-process sliding-window implementation.
+type MemoryRateLimiter struct {
+	mu        sync.Mutex
+	windows   map[string]*slidingWindow
+	maxReq    int
+	maxTok    int
+	windowDur time.Duration
+}
+
+// NewMemoryRateLimiter creates a rate limiter.
+// maxRequests and maxTokens of 0 mean unlimited.
+func NewMemoryRateLimiter(maxRequests, maxTokens int, windowDur time.Duration) *MemoryRateLimiter {
+	if windowDur <= 0 {
+		windowDur = 60 * time.Second
+	}
+	return &MemoryRateLimiter{
+		windows:   make(map[string]*slidingWindow),
+		maxReq:    maxRequests,
+		maxTok:    maxTokens,
+		windowDur: windowDur,
 	}
 }
 
-// Allow records a request if it fits inside limit.
-func (l *SlidingWindowLimiter) Allow(_ context.Context, key LimitKey, limit RateLimit, tokens int) Decision {
-	if limit.Window <= 0 {
+// Reload updates limits atomically (for hot reload).
+func (m *MemoryRateLimiter) Reload(cfg RateLimit) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maxReq = cfg.MaxRequests
+	m.maxTok = cfg.MaxTokens
+	if cfg.WindowSec > 0 {
+		m.windowDur = time.Duration(cfg.WindowSec) * time.Second
+	}
+}
+
+// Check evaluates whether the request should be allowed.
+func (m *MemoryRateLimiter) Check(_ context.Context, id schema.Identity, tokenCost int) Decision {
+	if m.maxReq == 0 && m.maxTok == 0 {
 		return Decision{Allowed: true}
 	}
-	if tokens < 0 {
-		tokens = 0
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := windowKey(id)
+	now := time.Now()
+	cutoff := now.Add(-m.windowDur)
+
+	w := m.getOrCreate(key)
+	purge(w, cutoff)
+
+	reqCount := len(w.entries)
+	tokCount := sumTokens(w)
+
+	if m.maxReq > 0 && reqCount >= m.maxReq {
+		oldest := w.entries[0].at
+		retryAfter := m.windowDur - now.Sub(oldest)
+		return Decision{Allowed: false, RetryAfter: retryAfter}
+	}
+	if m.maxTok > 0 && tokCount+tokenCost > m.maxTok {
+		oldest := w.entries[0].at
+		retryAfter := m.windowDur - now.Sub(oldest)
+		return Decision{Allowed: false, RetryAfter: retryAfter}
 	}
 
-	now := l.now()
-	cutoff := now.Add(-limit.Window)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	events := prune(l.events[key], cutoff)
-	requests := len(events)
-	usedTokens := 0
-	for _, ev := range events {
-		usedTokens += ev.tokens
+	remaining := 0
+	if m.maxReq > 0 {
+		remaining = m.maxReq - reqCount - 1
 	}
-
-	if limit.MaxRequests > 0 && requests+1 > limit.MaxRequests {
-		return denied("request_limit_exceeded", retryAfter(events, cutoff), limit, requests, usedTokens)
-	}
-	if limit.MaxTokens > 0 && usedTokens+tokens > limit.MaxTokens {
-		return denied("token_limit_exceeded", retryAfter(events, cutoff), limit, requests, usedTokens)
-	}
-
-	events = append(events, usageEvent{at: now, tokens: tokens})
-	l.events[key] = events
-
-	return Decision{
-		Allowed: true,
-		Remaining: Remaining{
-			Requests: remaining(limit.MaxRequests, len(events)),
-			Tokens:   remaining(limit.MaxTokens, usedTokens+tokens),
-		},
-	}
+	return Decision{Allowed: true, Remaining: remaining}
 }
 
-func prune(events []usageEvent, cutoff time.Time) []usageEvent {
+// Record adds the actual call to the window after it completes.
+func (m *MemoryRateLimiter) Record(_ context.Context, id schema.Identity, tokensUsed int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := windowKey(id)
+	now := time.Now()
+	cutoff := now.Add(-m.windowDur)
+	w := m.getOrCreate(key)
+	purge(w, cutoff)
+	w.entries = append(w.entries, windowEntry{at: now, tokens: tokensUsed})
+}
+
+func (m *MemoryRateLimiter) getOrCreate(key string) *slidingWindow {
+	w, ok := m.windows[key]
+	if !ok {
+		w = &slidingWindow{}
+		m.windows[key] = w
+	}
+	return w
+}
+
+func windowKey(id schema.Identity) string {
+	return fmt.Sprintf("%s:%s:%s", id.TenantID, id.UserID, id.UseCaseID)
+}
+
+func purge(w *slidingWindow, cutoff time.Time) {
 	i := 0
-	for ; i < len(events); i++ {
-		if events[i].at.After(cutoff) {
-			break
-		}
+	for i < len(w.entries) && w.entries[i].at.Before(cutoff) {
+		i++
 	}
-	return events[i:]
+	w.entries = w.entries[i:]
 }
 
-func retryAfter(events []usageEvent, cutoff time.Time) time.Duration {
-	if len(events) == 0 {
-		return 0
+func sumTokens(w *slidingWindow) int {
+	n := 0
+	for _, e := range w.entries {
+		n += e.tokens
 	}
-	d := events[0].at.Sub(cutoff)
-	if d < 0 {
-		return 0
-	}
-	return d
-}
-
-func denied(reason string, retry time.Duration, limit RateLimit, requests, tokens int) Decision {
-	return Decision{
-		Allowed:    false,
-		RetryAfter: retry,
-		Reason:     reason,
-		Remaining: Remaining{
-			Requests: remaining(limit.MaxRequests, requests),
-			Tokens:   remaining(limit.MaxTokens, tokens),
-		},
-	}
-}
-
-func remaining(limit, used int) int {
-	if limit <= 0 {
-		return 0
-	}
-	left := limit - used
-	if left < 0 {
-		return 0
-	}
-	return left
+	return n
 }

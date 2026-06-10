@@ -1,42 +1,50 @@
+// Package identity normalizes caller identity from request headers.
 package identity
 
-import "strings"
+import (
+	"context"
+	"net/http"
 
-// Headers is a map of header name to values; pass r.Header directly.
-type Headers map[string][]string
+	"github.com/YashVishwas/ixr/pkg/schema"
+)
 
-// Identity carries the normalized caller identity extracted from request headers.
-type Identity struct {
-	UserID    string
-	TenantID  string
-	UseCaseID string
-	RequestID string
+type contextKey struct{}
+
+// Resolver extracts Identity from an HTTP request's headers.
+type Resolver struct{}
+
+// New returns a Resolver.
+func New() *Resolver { return &Resolver{} }
+
+// Resolve extracts Identity from the canonical ixr headers.
+// TenantID defaults to "default" when absent.
+func (r *Resolver) Resolve(req *http.Request) schema.Identity {
+	return schema.Identity{
+		TenantID:  firstNonEmpty(req.Header.Get("X-IXR-TenantID"), "default"),
+		UserID:    req.Header.Get("X-IXR-UserID"),
+		UseCaseID: req.Header.Get("X-IXR-UseCase"),
+	}
 }
 
-// Resolver extracts Identity from request headers.
-type Resolver struct {
-	DefaultTenantID string
+// WithIdentity stores id in ctx for downstream handlers.
+func WithIdentity(ctx context.Context, id schema.Identity) context.Context {
+	return context.WithValue(ctx, contextKey{}, id)
 }
 
-// Resolve reads X-IXR-User, X-IXR-Tenant, X-IXR-UseCase, and X-Request-ID headers.
-// Header names are matched case-insensitively. Nil headers yield defaults.
-func (r Resolver) Resolve(h Headers) Identity {
-	get := func(key string) string {
-		for k, vs := range h {
-			if strings.EqualFold(k, key) && len(vs) > 0 {
-				return strings.TrimSpace(vs[0])
-			}
+// FromContext retrieves Identity from ctx. Returns zero-value with TenantID="default" if absent.
+func FromContext(ctx context.Context) schema.Identity {
+	id, ok := ctx.Value(contextKey{}).(schema.Identity)
+	if !ok {
+		return schema.Identity{TenantID: "default"}
+	}
+	return id
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
 		}
-		return ""
 	}
-	tenant := get("X-IXR-Tenant")
-	if tenant == "" {
-		tenant = r.DefaultTenantID
-	}
-	return Identity{
-		UserID:    get("X-IXR-User"),
-		TenantID:  tenant,
-		UseCaseID: get("X-IXR-UseCase"),
-		RequestID: get("X-Request-ID"),
-	}
+	return ""
 }

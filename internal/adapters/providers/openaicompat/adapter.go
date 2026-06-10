@@ -3,13 +3,16 @@
 package openaicompat
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
+	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
@@ -22,13 +25,12 @@ type Adapter struct {
 	client       *http.Client
 }
 
-// New returns an adapter with the given logical provider name and default base URL
-// (e.g. https://api.deepseek.com/v1). Pass baseURL="" to use defaultBase.
+// New returns an adapter with the given logical provider name and default base URL.
 func New(name, apiKey, baseURL, defaultBase string) *Adapter {
 	return NewWithHeaders(name, apiKey, baseURL, defaultBase, nil)
 }
 
-// NewWithHeaders is like New but sends extra HTTP headers on each request (e.g. OpenRouter).
+// NewWithHeaders is like New but sends extra HTTP headers on each request.
 func NewWithHeaders(name, apiKey, baseURL, defaultBase string, extraHeaders map[string]string) *Adapter {
 	if baseURL == "" {
 		baseURL = defaultBase
@@ -83,6 +85,79 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 	}
 
 	return fromWireResponse(&wireResp), nil
+}
+
+// Stream sends req with stream=true and delivers each SSE chunk to fn.
+func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
+	wireReq := toWireRequest(req)
+	wireReq.Stream = true
+
+	body, err := json.Marshal(wireReq)
+	if err != nil {
+		return fmt.Errorf("%s: marshal stream request: %w", a.name, err)
+	}
+
+	url := trimTrailingSlash(a.baseURL) + "/chat/completions"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("%s: build stream request: %w", a.name, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	for k, v := range a.extraHeaders {
+		httpReq.Header.Set(k, v)
+	}
+
+	httpResp, err := a.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("%s: do stream request: %w", a.name, err)
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(httpResp.Body)
+		return fmt.Errorf("%s: stream status %d: %s", a.name, httpResp.StatusCode, b)
+	}
+
+	scanner := bufio.NewScanner(httpResp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			return nil
+		}
+		var delta wireDeltaResponse
+		if err := json.Unmarshal([]byte(data), &delta); err != nil {
+			continue // malformed chunk — skip
+		}
+		chunk := deltaToChunk(&delta)
+		if err := fn(chunk); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func deltaToChunk(d *wireDeltaResponse) provider.StreamChunk {
+	chunk := provider.StreamChunk{ID: d.ID, Model: d.Model}
+	if len(d.Choices) > 0 {
+		c := d.Choices[0]
+		chunk.Delta = schema.Message{Role: c.Delta.Role, Content: c.Delta.Content}
+		chunk.FinishReason = c.FinishReason
+	}
+	if d.Usage != nil {
+		u := schema.Usage{
+			PromptTokens:     d.Usage.PromptTokens,
+			CompletionTokens: d.Usage.CompletionTokens,
+			TotalTokens:      d.Usage.TotalTokens,
+		}
+		chunk.Usage = &u
+	}
+	return chunk
 }
 
 func trimTrailingSlash(s string) string {

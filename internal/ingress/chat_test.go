@@ -31,6 +31,9 @@ func (s *stubProvider) Chat(ctx context.Context, req *schema.RequestEnvelope) (*
 	}
 	return s.resp, s.err
 }
+func (s *stubProvider) Stream(_ context.Context, _ *schema.RequestEnvelope, _ func(provider.StreamChunk) error) error {
+	return s.err
+}
 
 func fixedRouter(p provider.Provider) Router {
 	return func(_ string) (provider.Provider, error) { return p, nil }
@@ -70,11 +73,18 @@ func TestChatHandler_MissingModel(t *testing.T) {
 	}
 }
 
-func TestChatHandler_StreamRejected(t *testing.T) {
-	h := NewChatHandler(fixedRouter(&stubProvider{}), nil)
+func TestChatHandler_StreamReturnsSSE(t *testing.T) {
+	h := NewChatHandler(fixedRouter(&stubProvider{name: "test"}), nil)
 	w := post(h, `{"model":"gpt-4o","stream":true,"messages":[]}`)
-	if w.Code != http.StatusNotImplemented {
-		t.Errorf("status: got %d, want 501", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("status: got %d, want 200", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("content-type: got %q, want text/event-stream", ct)
+	}
+	if !strings.Contains(w.Body.String(), "[DONE]") {
+		t.Errorf("body should contain [DONE], got %q", w.Body.String())
 	}
 }
 

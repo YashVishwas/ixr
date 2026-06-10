@@ -1,26 +1,21 @@
 package routing
 
-// Constraints are hard routing requirements. Zero values are unconstrained.
-type Constraints struct {
-	MaxCostUSDPer1M float64
-	MaxLatencyMS    int
-}
+import "github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 
-// FilterCandidates removes models that violate hard constraints or have open circuits.
-func FilterCandidates(candidates []Candidate, stats map[string]ModelStats, constraints Constraints) []Candidate {
-	out := make([]Candidate, 0, len(candidates))
-	for _, c := range candidates {
-		s := stats[c.Model]
-		if constraints.MaxCostUSDPer1M > 0 && s.CostUSDPer1M > constraints.MaxCostUSDPer1M {
+// Filter removes models that violate hard constraints:
+//   - blended cost > hint.MaxCostUSDPer1M (when cap > 0)
+//   - circuit breaker is open (when cb is non-nil)
+func Filter(models []ModelCard, hint TaskHint, cb *circuitbreaker.Registry) []ModelCard {
+	inputShare := estimateInputShare(hint.PromptChars)
+	var out []ModelCard
+	for _, m := range models {
+		if hint.MaxCostUSDPer1M > 0 && blendedCost(m, inputShare) > hint.MaxCostUSDPer1M {
 			continue
 		}
-		if constraints.MaxLatencyMS > 0 && s.P95LatencyMS > constraints.MaxLatencyMS {
+		if cb != nil && !cb.IsAllowed(m.ID) {
 			continue
 		}
-		if s.CircuitOpen {
-			continue
-		}
-		out = append(out, c)
+		out = append(out, m)
 	}
 	return out
 }

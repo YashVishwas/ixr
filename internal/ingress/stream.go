@@ -4,63 +4,65 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
+
+	"github.com/YashVishwas/ixr/pkg/provider"
 )
 
-// StreamChunk is the normalized unit emitted for SSE chat streams.
-type StreamChunk struct {
-	ID     string `json:"id,omitempty"`
-	Model  string `json:"model,omitempty"`
-	Delta  string `json:"delta,omitempty"`
-	Finish string `json:"finish_reason,omitempty"`
-	Tokens int    `json:"tokens,omitempty"`
-	Error  string `json:"error,omitempty"`
-	Done   bool   `json:"done,omitempty"`
-}
-
-// StreamWriter writes OpenAI-compatible server-sent events.
-type StreamWriter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-}
-
-// NewStreamWriter prepares w for text/event-stream output.
-func NewStreamWriter(w http.ResponseWriter) (*StreamWriter, bool) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return nil, false
-	}
+// writeSSEHeader sets headers required for server-sent events.
+func writeSSEHeader(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	return &StreamWriter{w: w, flusher: flusher}, true
+	w.Header().Set("X-Accel-Buffering", "no")
 }
 
-// WriteChunk writes one SSE data event.
-func (s *StreamWriter) WriteChunk(chunk StreamChunk) error {
-	if s == nil {
-		return nil
+type sseChunkEnvelope struct {
+	ID      string           `json:"id"`
+	Object  string           `json:"object"`
+	Created int64            `json:"created"`
+	Model   string           `json:"model"`
+	Choices []sseDeltaChoice `json:"choices"`
+}
+
+type sseDeltaChoice struct {
+	Index        int     `json:"index"`
+	Delta        sseDelta `json:"delta"`
+	FinishReason *string `json:"finish_reason"`
+}
+
+type sseDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// writeSSEChunk converts a provider.StreamChunk to the OpenAI SSE format and writes it.
+func writeSSEChunk(w http.ResponseWriter, chunk provider.StreamChunk) error {
+	var finishReason *string
+	if chunk.FinishReason != "" {
+		fr := chunk.FinishReason
+		finishReason = &fr
 	}
-	b, err := json.Marshal(chunk)
+	env := sseChunkEnvelope{
+		ID:      chunk.ID,
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   chunk.Model,
+		Choices: []sseDeltaChoice{{
+			Index:        0,
+			Delta:        sseDelta{Role: chunk.Delta.Role, Content: chunk.Delta.Content},
+			FinishReason: finishReason,
+		}},
+	}
+	b, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(s.w, "data: %s\n\n", b); err != nil {
-		return err
-	}
-	s.flusher.Flush()
-	return nil
+	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
+	return err
 }
 
-// Done writes the terminal OpenAI-compatible stream marker.
-func (s *StreamWriter) Done() error {
-	if s == nil {
-		return nil
-	}
-	if _, err := fmt.Fprint(s.w, "data: [DONE]\n\n"); err != nil {
-		return err
-	}
-	s.flusher.Flush()
-	return nil
+// writeSSEDone writes the terminal [DONE] event.
+func writeSSEDone(w http.ResponseWriter) {
+	fmt.Fprint(w, "data: [DONE]\n\n")
 }
-
-// streamHandler handles server-sent event streaming for chat completions.

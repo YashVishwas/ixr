@@ -10,6 +10,7 @@ type CallEvent struct {
 	ID        string           `json:"id"`
 	Timestamp time.Time        `json:"timestamp"`
 	UseCaseID string           `json:"use_case_id"` // from X-IXR-UseCase header
+	TenantID  string           `json:"tenant_id"`   // from identity context
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
 	Latency   time.Duration    `json:"latency_ms"`
@@ -19,22 +20,37 @@ type CallEvent struct {
 	Request   RequestEnvelope  `json:"request"`
 	Response  ResponseEnvelope `json:"response"`
 	Error     string           `json:"error,omitempty"`
+	Streaming bool             `json:"streaming,omitempty"`
 	Shadow    *ShadowMetadata  `json:"shadow,omitempty"`
 }
 
-// ShadowMetadata identifies events produced by shadow routing. Shadow responses
-// are emitted for telemetry and offline comparison, never returned to callers.
+// ShadowMetadata is attached to CallEvents emitted for shadow-routed requests.
 type ShadowMetadata struct {
 	PrimaryID    string `json:"primary_id,omitempty"`
 	PrimaryModel string `json:"primary_model,omitempty"`
 	ShadowModel  string `json:"shadow_model,omitempty"`
 }
 
+// DeltaChunk is one streaming delta for stream-mode CallEvents on the bus.
+type DeltaChunk struct {
+	Index   int    `json:"index"`
+	Content string `json:"content"`
+	Role    string `json:"role,omitempty"`
+}
+
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.
 type RequestEnvelope struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream,omitempty"`
+	Model       string  `json:"model"`
+	Messages    []Message `json:"messages"`
+	Stream      bool    `json:"stream,omitempty"`
+	Tools       []Tool  `json:"tools,omitempty"`
+	ToolChoice  any     `json:"tool_choice,omitempty"` // string | ToolChoiceObject
+	Temperature float64 `json:"temperature,omitempty"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
+	TopP        float64 `json:"top_p,omitempty"`
+	N           int     `json:"n,omitempty"`
+	Stop        any     `json:"stop,omitempty"` // string | []string
+	User        string  `json:"user,omitempty"`
 }
 
 // ResponseEnvelope is ixr's canonical representation of a chat response,

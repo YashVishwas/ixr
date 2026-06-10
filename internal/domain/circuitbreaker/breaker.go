@@ -1,92 +1,113 @@
 // Package circuitbreaker watches model health and excludes degraded models from routing.
 // States: closed (healthy) → open (excluded) → half-open (probe) → closed.
-// Circuit state is stored in Redis so all ixr instances see it immediately.
 package circuitbreaker
 
-import "time"
-
-// State is the circuit breaker lifecycle state.
-type State string
-
-const (
-	Closed   State = "closed"
-	Open     State = "open"
-	HalfOpen State = "half_open"
+import (
+	"sync"
+	"time"
 )
 
-// Stats is the rolling model health snapshot used to evaluate transitions.
-type Stats struct {
-	Requests    int
-	SuccessRate float64
-	Window      time.Duration
-}
+// State is the circuit breaker state.
+type State int
 
-// Breaker is a deterministic state machine for one provider/model circuit.
+const (
+	StateClosed   State = iota // healthy; all requests pass
+	StateOpen                  // tripped; requests rejected
+	StateHalfOpen              // probing; limited requests allowed
+)
+
+// Breaker is a per-model circuit breaker implementing a sliding-window state machine.
 type Breaker struct {
-	policy     Policy
-	state      State
-	openedAt   time.Time
-	halfOpenAt time.Time
+	mu           sync.Mutex
+	state        State
+	policy       Policy
+	windowStart  time.Time
+	failures     int
+	total        int
+	openedAt     time.Time
+	probesSent   int
+	probesPassed int
 }
 
-// New creates a closed circuit breaker.
-func New(policy Policy) *Breaker {
-	if policy.FailureThreshold == 0 {
-		policy = DefaultPolicy()
+// New creates a closed Breaker using the given policy.
+func New(p Policy) *Breaker {
+	return &Breaker{
+		state:       StateClosed,
+		policy:      p,
+		windowStart: time.Now(),
 	}
-	return &Breaker{policy: policy, state: Closed}
 }
 
-// State returns the current circuit state.
-func (b *Breaker) State() State {
-	if b == nil {
-		return Closed
-	}
-	return b.state
-}
-
-// Allow reports whether a request may pass through the circuit.
-func (b *Breaker) Allow(now time.Time) bool {
-	if b == nil {
+// Allow returns true if a request should be forwarded to the upstream provider.
+func (b *Breaker) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	switch b.state {
+	case StateClosed:
+		if now.Sub(b.windowStart) > b.policy.WindowDuration {
+			b.failures, b.total = 0, 0
+			b.windowStart = now
+		}
 		return true
+	case StateOpen:
+		if now.Sub(b.openedAt) < b.policy.HalfOpenAfter {
+			return false
+		}
+		b.state = StateHalfOpen
+		b.probesSent, b.probesPassed = 0, 0
+		fallthrough
+	case StateHalfOpen:
+		if b.probesSent < b.policy.ProbeCount {
+			b.probesSent++
+			return true
+		}
+		return false
 	}
-	if b.state == Open && now.Sub(b.openedAt) >= b.policy.HalfOpenAfter {
-		b.state = HalfOpen
-		b.halfOpenAt = now
-		return true
-	}
-	return b.state != Open
+	return false
 }
 
-// ObserveHealth updates the circuit from rolling aggregate stats.
-func (b *Breaker) ObserveHealth(now time.Time, stats Stats) State {
-	if b == nil {
-		return Closed
+// RecordSuccess must be called after a successful provider response.
+func (b *Breaker) RecordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case StateClosed:
+		b.total++
+	case StateHalfOpen:
+		b.probesPassed++
+		if b.probesPassed >= b.policy.ProbeCount {
+			b.state = StateClosed
+			b.failures, b.total = 0, 0
+			b.windowStart = time.Now()
+		}
 	}
-	if b.state != Closed {
-		return b.state
+}
+
+// RecordFailure must be called after a provider error.
+func (b *Breaker) RecordFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case StateClosed:
+		b.failures++
+		b.total++
+		if b.total >= b.policy.MinRequests {
+			rate := float64(b.total-b.failures) / float64(b.total)
+			if rate < b.policy.SuccessRateThreshold {
+				b.state = StateOpen
+				b.openedAt = time.Now()
+			}
+		}
+	case StateHalfOpen:
+		b.state = StateOpen
+		b.openedAt = time.Now()
 	}
-	if stats.Requests < b.policy.MinRequests || stats.Window < b.policy.OpenAfter {
-		return b.state
-	}
-	if stats.SuccessRate < b.policy.FailureThreshold {
-		b.state = Open
-		b.openedAt = now
-	}
+}
+
+// CurrentState returns the breaker's current state (for monitoring).
+func (b *Breaker) CurrentState() State {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.state
-}
-
-// ProbeSucceeded closes a half-open circuit after a successful probe.
-func (b *Breaker) ProbeSucceeded() {
-	if b != nil && b.state == HalfOpen {
-		b.state = Closed
-	}
-}
-
-// ProbeFailed reopens a half-open circuit after a failed probe.
-func (b *Breaker) ProbeFailed(now time.Time) {
-	if b != nil && b.state == HalfOpen {
-		b.state = Open
-		b.openedAt = now
-	}
 }

@@ -38,6 +38,31 @@ type wireUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// wireDeltaResponse is the JSON shape of each SSE chunk from OpenAI-compat APIs.
+type wireDeltaResponse struct {
+	ID      string             `json:"id"`
+	Model   string             `json:"model"`
+	Choices []wireDeltaChoice  `json:"choices"`
+	Usage   *wireDeltaUsage    `json:"usage,omitempty"`
+}
+
+type wireDeltaChoice struct {
+	Index        int              `json:"index"`
+	Delta        wireDeltaMessage `json:"delta"`
+	FinishReason string           `json:"finish_reason"`
+}
+
+type wireDeltaMessage struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+type wireDeltaUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	msgs := make([]wireMessage, len(req.Messages))
 	for i, m := range req.Messages {

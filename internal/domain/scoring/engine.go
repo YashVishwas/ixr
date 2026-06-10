@@ -3,129 +3,78 @@
 // v2: bandit algorithms (epsilon-greedy and UCB) that learn from real traffic.
 package scoring
 
-import "sort"
+import (
+	"context"
+	"fmt"
+	"sort"
 
-// Candidate is a routable provider/model pair.
-type Candidate struct {
-	Provider string
-	Model    string
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/routing"
+	"github.com/YashVishwas/ixr/pkg/store"
+)
+
+// Engine implements the Phase 2 deterministic scoring pipeline.
+// It loads per-intent routing policies, filters the model catalog, queries live
+// performance stats, scores each candidate, and returns a RoutingDecision.
+type Engine struct {
+	perfStore   store.ModelPerfStore
+	policyStore store.PolicyStore
+	catalog     []routing.ModelCard
 }
 
-// ModelSnapshot is the precomputed hot-path model performance record.
-type ModelSnapshot struct {
-	Model        string
-	Cost        float64
-	P50Latency  float64
-	P95Latency  float64
-	SuccessRate float64
-	CircuitOpen bool
+// NewEngine creates a scoring engine backed by the given stores and model catalog.
+// Pass routing.Catalog() for the default catalog.
+func NewEngine(perf store.ModelPerfStore, policy store.PolicyStore, catalog []routing.ModelCard) *Engine {
+	return &Engine{perfStore: perf, policyStore: policy, catalog: catalog}
 }
 
-// Request describes the deterministic v1 scoring input.
-type Request struct {
-	Candidates   []Candidate
-	Stats        map[string]ModelSnapshot
-	Weights      Weights
-	MaxCost       float64
-	MaxLatencyP95 float64
-	FallbackLimit int
-}
+// Decide selects the best model for hint, using live stats and policy weights.
+// cb may be nil (circuit breaker filtering is skipped when nil).
+func (e *Engine) Decide(ctx context.Context, hint routing.TaskHint, cb *circuitbreaker.Registry) (routing.RoutingDecision, error) {
+	intent := intentFromHint(hint)
 
-// Weights controls deterministic v1 scoring. Lower score wins.
-type Weights struct {
-	Cost        float64
-	Latency     float64
-	Reliability float64
-}
-
-// Decision is the selected model plus fallback chain.
-type Decision struct {
-	Primary   Candidate
-	Fallbacks []Candidate
-	Score     float64
-}
-
-// Engine computes deterministic v1 routing decisions.
-type Engine struct{}
-
-// Decide filters candidates, scores them, and returns the best candidate with fallbacks.
-func (Engine) Decide(req Request) (Decision, bool) {
-	scored := score(req)
-	if len(scored) == 0 {
-		return Decision{}, false
-	}
-	limit := req.FallbackLimit
-	if limit <= 0 {
-		limit = 2
-	}
-	fallbacks := make([]Candidate, 0, limit)
-	for _, item := range scored[1:] {
-		fallbacks = append(fallbacks, item.candidate)
-		if len(fallbacks) == limit {
-			break
-		}
-	}
-	return Decision{Primary: scored[0].candidate, Fallbacks: fallbacks, Score: scored[0].score}, true
-}
-
-type scoredCandidate struct {
-	candidate Candidate
-	score     float64
-}
-
-func score(req Request) []scoredCandidate {
-	weights := req.Weights
-	if weights == (Weights{}) {
-		weights = Weights{Cost: 0.33, Latency: 0.33, Reliability: 0.34}
+	policy, err := e.policyStore.GetPolicy(ctx, intent)
+	if err != nil {
+		return routing.RoutingDecision{}, fmt.Errorf("scoring engine: get policy: %w", err)
 	}
 
-	maxCost := 0.0
-	maxLatency := 0.0
-	for _, c := range req.Candidates {
-		s := req.Stats[c.Model]
-		if req.MaxCost > 0 && s.Cost > req.MaxCost {
-			continue
-		}
-		if req.MaxLatencyP95 > 0 && s.P95Latency > req.MaxLatencyP95 {
-			continue
-		}
-		if s.CircuitOpen {
-			continue
-		}
-		if s.Cost > maxCost {
-			maxCost = s.Cost
-		}
-		if s.P50Latency > maxLatency {
-			maxLatency = s.P50Latency
-		}
+	filtered := routing.Filter(e.catalog, hint, cb)
+	if len(filtered) == 0 {
+		return routing.RoutingDecision{}, fmt.Errorf("scoring engine: no models pass filter constraints")
 	}
 
-	out := make([]scoredCandidate, 0, len(req.Candidates))
-	for _, c := range req.Candidates {
-		s := req.Stats[c.Model]
-		if req.MaxCost > 0 && s.Cost > req.MaxCost {
-			continue
-		}
-		if req.MaxLatencyP95 > 0 && s.P95Latency > req.MaxLatencyP95 {
-			continue
-		}
-		if s.CircuitOpen {
-			continue
-		}
-		score := weights.Cost*normalize(s.Cost, maxCost) +
-			weights.Latency*normalize(s.P50Latency, maxLatency) +
-			weights.Reliability*(1-clamp(s.SuccessRate))
-		out = append(out, scoredCandidate{candidate: c, score: score})
+	inputShare := routing.InputShare(hint.PromptChars)
+	weights := [3]float64{policy.CostWeight, policy.LatencyWeight, policy.ReliabilityWeight}
+
+	candidates := make([]routing.Candidate, 0, len(filtered))
+	for _, m := range filtered {
+		stats, _ := e.perfStore.Get(ctx, m.ID, intent)
+		score := routing.Score(m, hint, stats, weights, inputShare)
+		candidates = append(candidates, routing.Candidate{Model: m.ID, Score: score})
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].score < out[j].score
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
 	})
-	return out
+
+	primary := candidates[0].Model
+	return routing.RoutingDecision{
+		Model:         primary,
+		FallbackChain: routing.BuildFallbackChain(candidates, primary, 2),
+	}, nil
 }
 
-func normalize(v, max float64) float64 {
-	if max <= 0 {
-		return 0
+func intentFromHint(hint routing.TaskHint) string {
+	switch {
+	case hint.ReasoningScore > 0:
+		return "reasoning"
+	case hint.CodingScore > 0:
+		return "coding"
+	case hint.MathScore > 0:
+		return "math"
+	case hint.MultilingualScore > 0:
+		return "multilingual"
+	default:
+		return "general"
 	}
-	return v / max
 }

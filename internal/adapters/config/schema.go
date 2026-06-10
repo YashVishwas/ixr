@@ -4,17 +4,20 @@ package config
 // All fields have sane defaults; only api_key values are required.
 type Config struct {
 	Server    ServerConfig              `yaml:"server"`
-	Providers map[string]ProviderConfig `yaml:"providers"`
 	Auth      AuthConfig                `yaml:"auth"`
-	Limits    LimitsConfig              `yaml:"limits"`
+	Providers map[string]ProviderConfig `yaml:"providers"`
 	Tenants   map[string]TenantConfig   `yaml:"tenants"`
-	Secrets   SecretsConfig             `yaml:"secrets"`
+	RateLimit RateLimitConfig           `yaml:"rate_limit"`
 	LogLevel  string                    `yaml:"log_level"`
+	Secrets   SecretsConfig             `yaml:"secrets"`
 }
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Port int `yaml:"port"`
+	Port     int    `yaml:"port"`
+	TLSCert  string `yaml:"tls_cert"`  // path to PEM cert; enables TLS when set
+	TLSKey   string `yaml:"tls_key"`   // path to PEM private key
+	ClientCA string `yaml:"client_ca"` // PEM CA for mTLS client verification
 }
 
 // ProviderConfig holds credentials and options for a single LLM provider.
@@ -23,41 +26,57 @@ type ProviderConfig struct {
 	BaseURL string `yaml:"base_url,omitempty"`
 }
 
-// AuthConfig holds ingress auth settings.
+// AuthConfig controls inbound request authentication.
 type AuthConfig struct {
-	RequireMTLS bool                    `yaml:"require_mtls,omitempty"`
-	APIKeys     map[string]APIKeyConfig `yaml:"api_keys,omitempty"`
-	JWT         JWTConfig               `yaml:"jwt,omitempty"`
+	APIKeys     []APIKeyEntry `yaml:"api_keys"`
+	JWT         JWTConfig     `yaml:"jwt"`
+	DisableAuth bool          `yaml:"disable_auth"`
 }
 
-type APIKeyConfig struct {
-	Secret        string   `yaml:"secret"`
-	Scopes        []string `yaml:"scopes,omitempty"`
-	AllowedModels []string `yaml:"allowed_models,omitempty"`
-	DailyUSD      float64  `yaml:"daily_usd,omitempty"`
+// APIKeyEntry defines a single API key with its associated permissions.
+type APIKeyEntry struct {
+	Key           string   `yaml:"key"`
+	TenantID      string   `yaml:"tenant_id"`
+	Scopes        []string `yaml:"scopes"`
+	DailyReqCap   int      `yaml:"daily_req_cap"`
+	DailyTokenCap int      `yaml:"daily_token_cap"`
 }
 
+// JWTConfig configures JWT Bearer token validation.
+// Secret and JWKSURL are mutually exclusive.
 type JWTConfig struct {
-	Issuer   string   `yaml:"issuer,omitempty"`
-	Audience string   `yaml:"audience,omitempty"`
-	JWKSURL  string   `yaml:"jwks_url,omitempty"`
-	Scopes   []string `yaml:"scopes,omitempty"`
+	Secret   string `yaml:"secret"`
+	JWKSURL  string `yaml:"jwks_url"`
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
 }
 
-type LimitsConfig struct {
-	WindowSeconds int `yaml:"window_seconds,omitempty"`
-	MaxRequests   int `yaml:"max_requests,omitempty"`
-	MaxTokens     int `yaml:"max_tokens,omitempty"`
-}
-
+// TenantConfig holds per-tenant overrides.
 type TenantConfig struct {
-	Providers map[string]ProviderConfig `yaml:"providers,omitempty"`
-	Limits    LimitsConfig              `yaml:"limits,omitempty"`
+	DisplayName string                    `yaml:"display_name"`
+	Providers   map[string]ProviderConfig `yaml:"providers"`
+	RateLimit   RateLimitConfig           `yaml:"rate_limit"`
+	Quotas      QuotaConfig               `yaml:"quotas"`
 }
 
+// QuotaConfig defines hard caps for a tenant.
+type QuotaConfig struct {
+	DailyRequestCap int     `yaml:"daily_req_cap"`
+	DailyTokenCap   int     `yaml:"daily_token_cap"`
+	MonthlyUSDCap   float64 `yaml:"monthly_usd_cap"`
+}
+
+// RateLimitConfig defines sliding-window rate limits.
+type RateLimitConfig struct {
+	WindowSec   int `yaml:"window_sec"`
+	MaxRequests int `yaml:"max_requests"`
+	MaxTokens   int `yaml:"max_tokens"`
+}
+
+// SecretsConfig enables resolution of ${vault:path} and ${ssm:path} references.
 type SecretsConfig struct {
-	Files            map[string]string `yaml:"files,omitempty"`
-	VaultAddr        string            `yaml:"vault_addr,omitempty"`
-	AWSSecretsRegion string            `yaml:"aws_secrets_region,omitempty"`
-	GCPProject       string            `yaml:"gcp_project,omitempty"`
+	Enabled    bool   `yaml:"enabled"`
+	VaultAddr  string `yaml:"vault_addr"`
+	VaultToken string `yaml:"vault_token"`
+	AWSRegion  string `yaml:"aws_region"`
 }

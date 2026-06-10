@@ -1,0 +1,11 @@
+server:
+  port: 8080
+
+log_level: info
+
+providers:
+  # Paid
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+
+

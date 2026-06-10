@@ -1,25 +1,44 @@
 package config
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
-// Validate checks config invariants that should fail startup.
-func Validate(c *Config) error {
-	if c == nil {
-		return nil
+// Validate checks a loaded Config for logical errors.
+// Returns a combined error listing all violations (not just the first).
+func Validate(cfg *Config) error {
+	var errs []error
+
+	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
+		errs = append(errs, fmt.Errorf("server.port %d is not in [1, 65535]", cfg.Server.Port))
 	}
-	if c.Server.Port < 0 || c.Server.Port > 65535 {
-		return fmt.Errorf("config: server.port out of range")
+
+	if cfg.Auth.JWT.Secret != "" && cfg.Auth.JWT.JWKSURL != "" {
+		errs = append(errs, errors.New("auth.jwt: secret and jwks_url are mutually exclusive"))
 	}
-	for name, key := range c.Auth.APIKeys {
-		if key.Secret == "" {
-			return fmt.Errorf("config: auth.api_keys.%s.secret is required", name)
+
+	for i, k := range cfg.Auth.APIKeys {
+		if k.Key == "" {
+			errs = append(errs, fmt.Errorf("auth.api_keys[%d]: key must not be empty", i))
 		}
-		if key.DailyUSD < 0 {
-			return fmt.Errorf("config: auth.api_keys.%s.daily_usd cannot be negative", name)
+	}
+
+	if cfg.RateLimit.MaxRequests > 0 || cfg.RateLimit.MaxTokens > 0 {
+		if cfg.RateLimit.WindowSec <= 0 {
+			errs = append(errs, errors.New("rate_limit.window_sec must be > 0 when limits are set"))
 		}
 	}
-	if c.Limits.WindowSeconds < 0 || c.Limits.MaxRequests < 0 || c.Limits.MaxTokens < 0 {
-		return fmt.Errorf("config: limits cannot be negative")
+
+	// Providers with an empty api_key are silently skipped by buildRegistry —
+	// listing a provider without a key is valid (key may come from env var or provider may be unused).
+
+	if cfg.Server.TLSCert != "" && cfg.Server.TLSKey == "" {
+		errs = append(errs, errors.New("server.tls_cert is set but server.tls_key is missing"))
 	}
-	return nil
+	if cfg.Server.TLSKey != "" && cfg.Server.TLSCert == "" {
+		errs = append(errs, errors.New("server.tls_key is set but server.tls_cert is missing"))
+	}
+
+	return errors.Join(errs...)
 }

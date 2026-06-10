@@ -1,21 +1,25 @@
 package identity
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestResolverResolveHeaders(t *testing.T) {
-	got := Resolver{DefaultTenantID: "default"}.Resolve(Headers{
-		"x-ixr-user":   {" user-1 "},
-		"X-IXR-Tenant": {"tenant-1"},
-		"X-IXR-UseCase": {"chat"},
-		"X-Request-ID":  {"req-1"},
-	})
-	if got.UserID != "user-1" || got.TenantID != "tenant-1" || got.UseCaseID != "chat" || got.RequestID != "req-1" {
+	req, _ := http.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("X-IXR-UserID", "user-1")
+	req.Header.Set("X-IXR-TenantID", "tenant-1")
+	req.Header.Set("X-IXR-UseCase", "chat")
+
+	got := New().Resolve(req)
+	if got.UserID != "user-1" || got.TenantID != "tenant-1" || got.UseCaseID != "chat" {
 		t.Fatalf("identity: got %+v", got)
 	}
 }
 
 func TestResolverDefaultTenant(t *testing.T) {
-	got := Resolver{DefaultTenantID: "default"}.Resolve(nil)
+	req, _ := http.NewRequest(http.MethodPost, "/", nil)
+	got := New().Resolve(req)
 	if got.TenantID != "default" {
 		t.Fatalf("tenant: got %q, want default", got.TenantID)
 	}

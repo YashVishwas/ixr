@@ -3,40 +3,24 @@ package modelperf
 import (
 	"context"
 	"errors"
-	"sync"
+
+	"github.com/YashVishwas/ixr/pkg/store"
 )
 
-// RedisStore is the hot cache adapter seam. The current implementation is an
-// in-memory stand-in so the scoring engine can be wired before adding a Redis client dependency.
-type RedisStore struct {
-	mu      sync.RWMutex
-	records map[string]Record
+var errNotConnected = errors.New("redis modelperf: not connected — use NewMemory() or wire a real Redis client")
+
+// Redis is the hot-cache ModelPerfStore backed by Redis.
+// Not wired until Redis is available; returns errNotConnected on all calls.
+type Redis struct{ addr string }
+
+func NewRedis(addr, _ string, _ int) *Redis { return &Redis{addr: addr} }
+
+func (r *Redis) Get(_ context.Context, _, _ string) (store.ModelStats, error) {
+	return store.ModelStats{}, errNotConnected
 }
 
-func NewRedisStore() *RedisStore {
-	return &RedisStore{records: map[string]Record{}}
-}
+func (r *Redis) Upsert(_ context.Context, _ store.ModelStats) error { return errNotConnected }
 
-func (s *RedisStore) Get(_ context.Context, model, intent string) (Record, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rec, ok := s.records[key(model, intent)]
-	if !ok {
-		return Record{}, errors.New("model performance record not found")
-	}
-	return rec, nil
+func (r *Redis) List(_ context.Context, _ string) ([]store.ModelStats, error) {
+	return nil, errNotConnected
 }
-
-func (s *RedisStore) Put(_ context.Context, record Record) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.records[key(record.Model, record.Intent)] = record
-	return nil
-}
-
-func key(model, intent string) string {
-	return model + "\x00" + intent
-}
-
-// redis is the hot cache for scoring engine reads (target: < 1ms).
-// All data is pre-computed and written here by the telemetry pipeline.

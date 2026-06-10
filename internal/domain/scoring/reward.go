@@ -1,50 +1,30 @@
 package scoring
 
-// RewardWeights controls the adaptive routing reward calculation.
+// RewardWeights defines the coefficients for the reward function.
 type RewardWeights struct {
-	Latency     float64
-	Cost        float64
-	Reliability float64
-	Quality     float64
+	Alpha float64 // weight for latency (1 - normLatency)
+	Beta  float64 // weight for cost    (1 - normCost)
+	Gamma float64 // weight for success rate
+	Delta float64 // weight for quality score
 }
 
-// RewardInput captures observed request outcome metrics.
-type RewardInput struct {
-	LatencyMS    float64
-	CostPerToken float64
-	SuccessRate  float64
-	QualityScore float64
+// DefaultRewardWeights is a balanced starting point for adaptive routing.
+var DefaultRewardWeights = RewardWeights{
+	Alpha: 0.3,
+	Beta:  0.2,
+	Gamma: 0.4,
+	Delta: 0.1,
 }
 
-// Reward computes a bounded positive reward. Higher is better.
-func Reward(weights RewardWeights, input RewardInput) float64 {
-	if weights == (RewardWeights{}) {
-		weights = RewardWeights{Latency: 0.25, Cost: 0.25, Reliability: 0.25, Quality: 0.25}
+// Reward computes a scalar reward in [0, 1] for a single model invocation.
+// normLatency and normCost are min-max normalized in [0, 1] across the candidate set.
+// quality is a quality score in [0, 1]; pass 0 when unknown.
+func Reward(latencyMS, costUSD float64, success bool, quality, normLatency, normCost float64, w RewardWeights) float64 {
+	_ = latencyMS // raw values are for callers to normalize; normalized forms are used here
+	_ = costUSD
+	var sv float64
+	if success {
+		sv = 1.0
 	}
-	latency := 0.0
-	if input.LatencyMS > 0 {
-		latency = 1 / input.LatencyMS
-	}
-	cost := 1 - input.CostPerToken
-	if cost < 0 {
-		cost = 0
-	}
-	return weights.Latency*latency +
-		weights.Cost*cost +
-		weights.Reliability*clamp(input.SuccessRate) +
-		weights.Quality*clamp(input.QualityScore)
+	return w.Alpha*(1.0-normLatency) + w.Beta*(1.0-normCost) + w.Gamma*sv + w.Delta*quality
 }
-
-func clamp(v float64) float64 {
-	switch {
-	case v < 0:
-		return 0
-	case v > 1:
-		return 1
-	default:
-		return v
-	}
-}
-
-// reward computes: α*(1/latency_ms) + β*(1-cost_per_token) + γ*success_rate + δ*quality_score.
-// α, β, γ, δ are learned per intent by the bandit algorithm.

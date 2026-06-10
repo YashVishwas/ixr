@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/pkg/bus"
@@ -16,26 +18,54 @@ import (
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
-const (
-	headerShadowModel     = "X-IXR-Shadow-Model"
-	headerShadowTimeoutMS = "X-IXR-Shadow-Timeout-MS"
-	defaultShadowTimeout  = 30 * time.Second
-)
+// headerShadowModel is the request header that triggers inline shadow routing.
+const headerShadowModel = "X-IXR-Shadow-Model"
 
 // Router picks a provider for a given model name.
 type Router func(model string) (provider.Provider, error)
 
+// ChatOption applies optional configuration to a ChatHandler.
+type ChatOption func(*ChatHandler)
+
+// WithEngine configures a live scoring engine for model="auto" routing.
+func WithEngine(e *scoring.Engine) ChatOption {
+	return func(h *ChatHandler) { h.engine = e }
+}
+
+// WithCBRegistry wires a circuit breaker registry into auto-routing decisions.
+func WithCBRegistry(cb *circuitbreaker.Registry) ChatOption {
+	return func(h *ChatHandler) { h.cbRegistry = cb }
+}
+
+// WithShadow attaches a shadow routing orchestrator.
+func WithShadow(s *scoring.Orchestrator) ChatOption {
+	return func(h *ChatHandler) { h.shadow = s }
+}
+
+// WithRetryConfig overrides the default retry/backoff settings.
+func WithRetryConfig(cfg routing.RetryConfig) ChatOption {
+	return func(h *ChatHandler) { h.retryCfg = cfg }
+}
+
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
-	router Router
-	bus    bus.Bus
+	router     Router
+	bus        bus.Bus
+	engine     *scoring.Engine
+	cbRegistry *circuitbreaker.Registry
+	shadow     *scoring.Orchestrator
+	retryCfg   routing.RetryConfig
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
 // Pass a non-nil bus to emit CallEvents after each request.
-func NewChatHandler(router Router, b bus.Bus) *ChatHandler {
-	return &ChatHandler{router: router, bus: b}
+func NewChatHandler(router Router, b bus.Bus, opts ...ChatOption) *ChatHandler {
+	h := &ChatHandler{router: router, bus: b, retryCfg: routing.DefaultRetryConfig}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,20 +85,23 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Streaming is phase 2 — reject early with a clear message.
-	if req.Stream {
-		writeError(w, http.StatusNotImplemented, "streaming_not_supported", "streaming is not yet supported; set stream=false")
-		return
-	}
-
 	if req.Model == "auto" {
 		hint := taskHintFromHeaders(r, &req)
-		resolved := routing.Route(hint)
-		if resolved == "" {
-			writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
-			return
+		if h.engine != nil {
+			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
+			if err != nil || decision.Model == "" {
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given constraints")
+				return
+			}
+			req.Model = decision.Model
+		} else {
+			resolved := routing.Route(hint)
+			if resolved == "" {
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+				return
+			}
+			req.Model = resolved
 		}
-		req.Model = resolved
 	}
 
 	p, err := h.router(req.Model)
@@ -77,11 +110,17 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Stream {
+		h.handleStream(w, r, p, &req)
+		return
+	}
+
 	start := time.Now()
 	resp, err := p.Chat(r.Context(), &req)
 	latency := time.Since(start)
 
 	if h.bus != nil {
+		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
 			Timestamp: start,
 			Provider:  p.Name(),
@@ -89,6 +128,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Latency:   latency,
 			Request:   req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+			TenantID:  id.TenantID,
 		}
 		if err != nil {
 			ev.Error = err.Error()
@@ -101,6 +141,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error", "err", pubErr)
 		}
+
+		if shadowModel := r.Header.Get(headerShadowModel); shadowModel != "" && shadowModel != req.Model {
+			primaryID := ""
+			if resp != nil {
+				primaryID = resp.ID
+			}
+			go h.runShadow(r, primaryID, req.Model, shadowModel, &req)
+		}
 	}
 
 	if err != nil {
@@ -109,117 +157,107 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.maybeRunShadow(r, req, resp)
-
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("failed to write response", "err", err)
 	}
 }
 
-func (h *ChatHandler) maybeRunShadow(r *http.Request, primaryReq schema.RequestEnvelope, primaryResp *schema.ResponseEnvelope) {
-	if h.bus == nil || primaryResp == nil {
+func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming_error", "server does not support streaming")
 		return
 	}
 
-	shadowModel := strings.TrimSpace(r.Header.Get(headerShadowModel))
-	decision := scoring.PlanShadow(
-		scoring.Candidate{Model: primaryReq.Model},
-		scoring.ShadowPolicy{Enabled: shadowModel != "", Model: scoring.Candidate{Model: shadowModel}},
-	)
-	if !decision.Enabled {
-		return
-	}
+	writeSSEHeader(w)
 
-	shadowReq := cloneRequest(primaryReq)
-	shadowReq.Model = decision.Model.Model
-	useCaseID := r.Header.Get("X-IXR-UseCase")
-	primaryID := primaryResp.ID
-	primaryModel := primaryReq.Model
-	timeout := shadowTimeout(r)
+	var totalIn, totalOut int
+	start := time.Now()
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-
-		p, err := h.router(shadowReq.Model)
-		if err != nil {
-			h.publishShadowEvent(ctx, useCaseID, primaryID, primaryModel, shadowReq, "", 0, nil, err)
-			return
+	streamErr := p.Stream(r.Context(), req, func(chunk provider.StreamChunk) error {
+		if chunk.Usage != nil {
+			totalIn = chunk.Usage.PromptTokens
+			totalOut = chunk.Usage.CompletionTokens
 		}
+		if err := writeSSEChunk(w, chunk); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	})
 
-		start := time.Now()
-		resp, err := p.Chat(ctx, &shadowReq)
-		latency := time.Since(start)
-		h.publishShadowEvent(ctx, useCaseID, primaryID, primaryModel, shadowReq, p.Name(), latency, resp, err)
-	}()
+	writeSSEDone(w)
+	flusher.Flush()
+
+	if h.bus != nil {
+		id := identity.FromContext(r.Context())
+		ev := &schema.CallEvent{
+			Timestamp: start,
+			Provider:  p.Name(),
+			Model:     req.Model,
+			Latency:   time.Since(start),
+			Request:   *req,
+			UseCaseID: r.Header.Get("X-IXR-UseCase"),
+			TenantID:  id.TenantID,
+			TokensIn:  totalIn,
+			TokensOut: totalOut,
+			Streaming: true,
+		}
+		if streamErr != nil {
+			ev.Error = streamErr.Error()
+		}
+		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
+			slog.Warn("bus publish error (stream)", "err", pubErr)
+		}
+	}
+
+	if streamErr != nil {
+		slog.Error("stream error", "provider", p.Name(), "model", req.Model, "err", streamErr)
+	}
 }
 
-func (h *ChatHandler) publishShadowEvent(
-	ctx context.Context,
-	useCaseID string,
-	primaryID string,
-	primaryModel string,
-	shadowReq schema.RequestEnvelope,
-	providerName string,
-	latency time.Duration,
-	resp *schema.ResponseEnvelope,
-	err error,
-) {
-	ev := &schema.CallEvent{
-		Timestamp: time.Now(),
-		UseCaseID: useCaseID,
-		Provider:  providerName,
-		Model:     shadowReq.Model,
-		Latency:   latency,
-		Request:   shadowReq,
-		Shadow: &schema.ShadowMetadata{
-			PrimaryID:    primaryID,
-			PrimaryModel: primaryModel,
-			ShadowModel:  shadowReq.Model,
-		},
+func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadowModel string, req *schema.RequestEnvelope) {
+	ctx := context.Background()
+	shadowReq := *req
+	shadowReq.Model = shadowModel
+
+	meta := &schema.ShadowMetadata{
+		PrimaryID:    primaryID,
+		PrimaryModel: primaryModel,
+		ShadowModel:  shadowModel,
 	}
+	id := identity.FromContext(r.Context())
+	start := time.Now()
+	ev := &schema.CallEvent{
+		Timestamp: start,
+		Model:     shadowModel,
+		UseCaseID: r.Header.Get("X-IXR-UseCase"),
+		TenantID:  id.TenantID,
+		Request:   shadowReq,
+		Shadow:    meta,
+	}
+
+	sp, err := h.router(shadowModel)
 	if err != nil {
 		ev.Error = err.Error()
-	} else if resp != nil {
+		ev.Latency = time.Since(start)
+		_ = h.bus.Publish(ctx, ev)
+		return
+	}
+	ev.Provider = sp.Name()
+
+	resp, err := sp.Chat(ctx, &shadowReq)
+	ev.Latency = time.Since(start)
+	if err != nil {
+		ev.Error = err.Error()
+	} else {
 		ev.ID = resp.ID
 		ev.TokensIn = resp.Usage.PromptTokens
 		ev.TokensOut = resp.Usage.CompletionTokens
 		ev.Response = *resp
 	}
-
-	if pubErr := h.bus.Publish(ctx, ev); pubErr != nil {
-		slog.Warn("shadow bus publish error", "err", pubErr)
-	}
-}
-
-func shadowTimeout(r *http.Request) time.Duration {
-	raw := strings.TrimSpace(r.Header.Get(headerShadowTimeoutMS))
-	if raw == "" {
-		return defaultShadowTimeout
-	}
-	ms, err := strconv.Atoi(raw)
-	if err != nil || ms <= 0 {
-		return defaultShadowTimeout
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
-func cloneRequest(req schema.RequestEnvelope) schema.RequestEnvelope {
-	out := req
-	if req.Messages == nil {
-		return out
-	}
-	out.Messages = make([]schema.Message, len(req.Messages))
-	copy(out.Messages, req.Messages)
-	for i := range req.Messages {
-		if req.Messages[i].ToolCalls == nil {
-			continue
-		}
-		out.Messages[i].ToolCalls = make([]schema.ToolCall, len(req.Messages[i].ToolCalls))
-		copy(out.Messages[i].ToolCalls, req.Messages[i].ToolCalls)
-	}
-	return out
+	_ = h.bus.Publish(ctx, ev)
 }
 
 func promptCharsFromMessages(req *schema.RequestEnvelope) int {

@@ -25,7 +25,7 @@ func (s *RedisStore) Get(_ context.Context, key string) (circuitbreaker.State, e
 	defer s.mu.RUnlock()
 	state, ok := s.states[key]
 	if !ok {
-		return circuitbreaker.Closed, errors.New("circuit state not found")
+		return circuitbreaker.StateClosed, errors.New("circuit state not found")
 	}
 	return state, nil
 }

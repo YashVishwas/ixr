@@ -1,29 +1,41 @@
 package scoring
 
-// RegretTracker accumulates regret for adaptive routing experiments.
+import (
+	"math"
+	"sync/atomic"
+)
+
+// RegretTracker accumulates cumulative regret = Σ(optimal_reward − chosen_reward).
+// All methods are safe for concurrent use.
 type RegretTracker struct {
-	Cumulative float64
-	Count      int
+	cumBits atomic.Uint64 // math.Float64bits encoding of the cumulative sum
+	count   atomic.Int64
 }
 
-// Observe adds one request's regret. Negative regret is clamped to zero.
-func (r *RegretTracker) Observe(optimalReward, chosenReward float64) {
-	regret := optimalReward - chosenReward
-	if regret < 0 {
-		regret = 0
+// Record adds one observation: optimal is the best available reward in the candidate
+// set; chosen is the reward actually received.
+func (t *RegretTracker) Record(optimal, chosen float64) {
+	regret := math.Max(0, optimal-chosen)
+	for {
+		old := t.cumBits.Load()
+		next := math.Float64bits(math.Float64frombits(old) + regret)
+		if t.cumBits.CompareAndSwap(old, next) {
+			break
+		}
 	}
-	r.Cumulative += regret
-	r.Count++
+	t.count.Add(1)
 }
 
-// Average returns average regret per observed request.
-func (r RegretTracker) Average() float64 {
-	if r.Count == 0 {
+// Cumulative returns the total regret accumulated so far.
+func (t *RegretTracker) Cumulative() float64 {
+	return math.Float64frombits(t.cumBits.Load())
+}
+
+// AverageRegret returns cumulative regret divided by the observation count.
+func (t *RegretTracker) AverageRegret() float64 {
+	n := t.count.Load()
+	if n == 0 {
 		return 0
 	}
-	return r.Cumulative / float64(r.Count)
+	return t.Cumulative() / float64(n)
 }
-
-// regret tracks cumulative regret = sum(optimal_reward - chosen_reward) across all requests.
-// Lower cumulative regret means the algorithm is learning faster.
-// This is the north star metric for v2 routing quality.
