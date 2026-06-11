@@ -32,6 +32,8 @@ BRANCH_FEATURES = {
     "main":               {"basic_routing", "auto_routing", "event_bus"},
     "demo_test":          {"basic_routing", "auto_routing", "event_bus"},
     "demo_cross_compile": {"basic_routing", "auto_routing", "event_bus"},
+    "demo-chain":         {"basic_routing", "auto_routing", "event_bus", "chain_routing"},
+    "demo-chain-ui":      {"basic_routing", "auto_routing", "event_bus", "chain_routing"},
     "phase-2": {
         "basic_routing", "auto_routing", "event_bus",
         "circuit_breaker_domain", "intent_parser", "scoring_engine",
@@ -66,7 +68,8 @@ def features_for(branch):
 # ── Provider detection ────────────────────────────────────────────────────────
 
 FREE_PROVIDERS = [
-    ("CEREBRAS_API_KEY",  "qwen3-8b",                   "Cerebras",   "qwen3-8b",          True),
+    ("CEREBRAS_API_KEY",  "gpt-oss-120b",               "Cerebras",   "gpt-oss-120b",       True),
+    ("CEREBRAS_API_KEY",  "zai-glm-4.7",                "Cerebras",   "zai-glm-4.7",        True),
     ("GROQ_API_KEY",      "llama-3.1-8b-instant",       "Groq/Llama", "llama-3.1-8b-instant", True),
     ("MISTRAL_API_KEY",   "mistral-small-latest",        "Mistral",    "mistral-small",      True),
     ("SAMBANOVA_API_KEY", "Meta-Llama-3.1-8B-Instruct", "SambaNova",  "Meta-Llama-3.1-8B", True),
@@ -278,10 +281,9 @@ def show_event(ev, client_lat_ms=None):
     kv("provider",    green(str(ev.get("provider", "?"))))
     kv("model",       bold(str(ev.get("model", "?"))))
 
-    # latency_ms field stores a Go time.Duration (nanoseconds); show both units.
     lat_raw = ev.get("latency_ms")
     if isinstance(lat_raw, (int, float)) and lat_raw > 0:
-        kv("latency_ms (server)", f"{lat_raw} ns  {dim(f'({lat_raw / 1_000_000:.1f} ms)')}")
+        kv("latency_ms (server)", f"{lat_raw} ms")
     else:
         kv("latency_ms (server)", str(lat_raw))
     if client_lat_ms is not None:
@@ -324,6 +326,13 @@ def show_event(ev, client_lat_ms=None):
 
     if ev.get("error"):
         kv("error", red(str(ev["error"])))
+
+    chain_meta = ev.get("chain")
+    if chain_meta:
+        kv("chain.id",    str(chain_meta.get("id", "?")))
+        if chain_meta.get("name"):
+            kv("chain.name",  str(chain_meta["name"]))
+        kv("chain.stage", f"{chain_meta.get('stage', '?')} / {chain_meta.get('total_stages', '?')}")
 
     hr("·")
 
@@ -576,12 +585,56 @@ def scenario_observability(port):
     print()
     note("Set IXR_OTLP_ENDPOINT=http://localhost:4318 to export traces to any OTLP collector.")
 
+def scenario_chain(port, providers):
+    section("Showcase — Multi-model chaining (X-IXR-Chain)")
+    note("Add X-IXR-Chain to pipe a request through models in sequence.")
+    note("Each stage sees the full conversation including every prior stage's reply.")
+    note("Use a named chain from ixr.yaml or inline: 'model-a,model-b'\n")
+
+    chain_name  = "fast-refine"
+    stage_count = 2
+    question    = "Explain what a hash table is and when to use one."
+
+    print(f"  Prompt: {bold(repr(question))}")
+    print(f"  Chain:  {bold(chain_name)}  {dim('(gpt-oss-120b drafts → zai-glm-4.7 refines)')}\n")
+
+    pos = _log_pos()
+    resp, lat, err = chat(port, {
+        "model": chain_name,
+        "messages": [{"role": "user", "content": question}],
+    }, extra_headers={
+        "X-IXR-Chain": chain_name,
+        "X-IXR-UseCase": "demo-chain",
+    }, timeout=90)
+
+    if err:
+        print(f"  {red('Chain error:')} {err}")
+        note("Make sure CEREBRAS_API_KEY is set and fast-refine is in ixr.yaml.")
+        return
+
+    response_box(f"Chain result  ({chain_name})", resp, lat, err)
+
+    events = read_events_after(pos, stage_count, timeout=max(30.0, (lat or 5) * 2 + 5))
+    for ev in events:
+        chain_meta = ev.get("chain", {})
+        stage = chain_meta.get("stage", "?")
+        total = chain_meta.get("total_stages", "?")
+        model_name = ev.get("model", "?")
+        print(f"\n  {bold(cyan(f'── Stage {stage} / {total}  ·  {model_name} ──'))}")
+        show_event(ev)
+
+    print()
+    note("The final response is from the last stage. Each stage's event appears")
+    note("in the audit log with chain.stage so you can trace the full pipeline.")
+
+
 # ── Feature summary ───────────────────────────────────────────────────────────
 
 ALL_FEATURES = [
     ("basic_routing",           "Basic OpenAI-compatible proxy routing"),
     ("auto_routing",            "Auto-routing via task / budget / latency hints"),
     ("event_bus",               "In-process event bus + audit-log plugin"),
+    ("chain_routing",           "Multi-model chaining via X-IXR-Chain header"),
     ("circuit_breaker_domain",  "Circuit breaker domain package"),
     ("intent_parser",           "Intent parser (X-IXR-Intent / complexity)"),
     ("scoring_engine",          "Bandit scoring engine with regret tracking"),
@@ -620,6 +673,7 @@ MODES = {
     "1": "Direct (you choose the model)",
     "2": "Auto-route (ixr picks based on task)",
     "3": "Compare (same question, two models)",
+    "4": "Chain (multi-model pipeline)",
 }
 
 def interactive_chat(port, providers, has_shadow):
@@ -631,7 +685,7 @@ def interactive_chat(port, providers, has_shadow):
     _, pm, ppname, pmshort, _ = primary
 
     while True:
-        print(f"  Mode:  {bold('[1]')} Direct  {bold('[2]')} Auto-route  {bold('[3]')} Compare  {bold('[q]')} Quit")
+        print(f"  Mode:  {bold('[1]')} Direct  {bold('[2]')} Auto-route  {bold('[3]')} Compare  {bold('[4]')} Chain  {bold('[q]')} Quit")
         try:
             mode = input(f"  {cyan('Choose mode:')} ").strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -639,7 +693,7 @@ def interactive_chat(port, providers, has_shadow):
             break
         if mode in ("q", "quit", "exit"):
             break
-        if mode not in ("1", "2", "3"):
+        if mode not in ("1", "2", "3", "4"):
             continue
 
         try:
@@ -717,6 +771,41 @@ def interactive_chat(port, providers, has_shadow):
                 ev1 = events_by_id.get((results[1][0] or {}).get("id", "")) if results[1][0] else None
                 show_event(ev1, client_lat_ms=results[1][1] * 1000 if results[1][1] is not None else None)
 
+        elif mode == "4":
+            NAMED_STAGES = {"fast-refine": 2, "smart-qa": 2, "debate": 3}
+            print(f"  Named chains: {bold('fast-refine')}  {bold('smart-qa')}  {bold('debate')}")
+            print(f"  Or inline:    {dim('gpt-oss-120b,zai-glm-4.7')}")
+            try:
+                chain_input = input(f"  {cyan('Chain:')} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not chain_input:
+                continue
+
+            stage_count = NAMED_STAGES.get(chain_input) or max(2, len([m for m in chain_input.split(",") if m.strip()]))
+
+            print(f"  {dim(f'Running {stage_count}-stage chain...')}")
+            pos = _log_pos()
+            resp, lat, err = chat(port, {
+                "model": chain_input,
+                "messages": [{"role": "user", "content": question}],
+            }, extra_headers={
+                "X-IXR-Chain": chain_input,
+                "X-IXR-UseCase": "demo-interactive",
+            }, timeout=90)
+
+            response_box(f"Chain: {chain_input}", resp, lat, err)
+
+            events = read_events_after(pos, stage_count, timeout=max(30.0, stage_count * 15.0))
+            for ev in events:
+                chain_meta = ev.get("chain", {})
+                stage      = chain_meta.get("stage", "?")
+                total      = chain_meta.get("total_stages", "?")
+                model_name = ev.get("model", "?")
+                print(f"\n  {bold(cyan(f'── Stage {stage}/{total}  ·  {model_name} ──'))}")
+                show_event(ev)
+
         print()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -755,6 +844,9 @@ def main():
     # Showcases
     scenario_routing_transparency(args.port, providers)
     scenario_auto_routing(args.port)
+
+    if "chain_routing" in features:
+        scenario_chain(args.port, providers)
 
     if "shadow_routing" in features and len(providers) >= 2:
         scenario_shadow(args.port, providers[0], providers[1])
