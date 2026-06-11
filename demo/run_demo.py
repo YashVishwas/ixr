@@ -339,34 +339,73 @@ def show_event(ev, client_lat_ms=None):
 # ── Routing decision explainer ────────────────────────────────────────────────
 
 # Mirrors the catalog in internal/domain/routing/router.go
+# Full catalog: (model, cost_in/1M, cost_out/1M, latency_sec, failure_rate,
+#                reasoning, coding, math, multilingual)
 CATALOG = [
-    ("claude-sonnet-4-6",       3.00,  0.95, 0.92, 0.95, 0.90),
-    ("gpt-4o-mini",             0.15,  0.85, 0.88, 0.87, 0.82),
-    ("gemini-1.5-flash",        0.075, 0.84, 0.82, 0.86, 0.92),
-    ("deepseek-chat",           0.27,  0.83, 0.85, 0.88, 0.76),
-    ("llama-3.3-70b-versatile", 0.0,   0.80, 0.76, 0.80, 0.76),
-    ("gpt-oss-120b",            0.0,   0.74, 0.72, 0.75, 0.72),
-    ("zai-glm-4.7",             0.0,   0.68, 0.65, 0.68, 0.80),
+    ("claude-sonnet-4-6",        3.00, 15.00, 1.2, 0.020, 0.95, 0.92, 0.95, 0.90),
+    ("gpt-4o-mini",              0.15,  0.60, 0.5, 0.025, 0.85, 0.88, 0.87, 0.82),
+    ("gemini-1.5-flash",        0.075,  0.30, 0.6, 0.025, 0.84, 0.82, 0.86, 0.92),
+    ("deepseek-chat",            0.27,  1.10, 2.0, 0.035, 0.83, 0.85, 0.88, 0.76),
+    ("llama-3.3-70b-versatile",  0.0,   0.0,  0.8, 0.040, 0.80, 0.76, 0.80, 0.76),
+    ("gpt-oss-120b",             0.0,   0.0,  0.5, 0.040, 0.74, 0.72, 0.75, 0.72),
+    ("zai-glm-4.7",              0.0,   0.0,  0.4, 0.045, 0.68, 0.65, 0.68, 0.80),
 ]
-# columns: model, cost/1M, reasoning, coding, math, multilingual
 
+# Task → (reasoning, coding, math, multilingual) weights sent as X-IXR-Task header.
+# "general" sends no header — Go returns capability=0.75 for all models,
+# so cost+latency determine the winner (free/fast models win).
 TASK_WEIGHTS = {
     "reasoning":    (1, 0, 0, 0),
     "coding":       (0, 1, 0, 0),
     "math":         (0, 0, 1, 0),
     "multilingual": (0, 0, 0, 1),
-    "general":      (0.25, 0.25, 0.25, 0.25),
+    "general":      (0, 0, 0, 0),  # no task hint → server uses 0.75 fallback
 }
 
-def explain_routing(task, budget):
-    """Return sorted list of (model, score, cost, passes_budget) from catalog."""
+_W_CAP, _W_COST, _W_LAT, _W_FAIL = 1.0, 0.18, 0.12, 0.10
+
+def _normalize(v, lo, hi):
+    if abs(hi - lo) < 1e-9:
+        return 0.0
+    return max(0.0, min(1.0, (v - lo) / (hi - lo)))
+
+def explain_routing(task, budget, prompt_chars=0):
+    """Return sorted list of (model, utility, cost_in, passes_budget) using the
+    same formula as the Go routing engine."""
     weights = TASK_WEIGHTS.get(task, TASK_WEIGHTS["general"])
+    wsum = sum(weights)
+
+    # Estimate input share (mirrors Go estimateInputShare).
+    if prompt_chars > 0:
+        x = prompt_chars / 8000.0
+        input_share = min(1.0, max(0.0, 0.25 + 0.5 * x / (x + 1)))
+    else:
+        input_share = 0.45
+
+    costs = [
+        input_share * c_in + (1 - input_share) * c_out
+        for _, c_in, c_out, *_ in CATALOG
+    ]
+    latencies = [row[3] for row in CATALOG]
+    min_cost, max_cost = min(costs), max(costs)
+    min_lat,  max_lat  = min(latencies), max(latencies)
+
     rows = []
-    for model, cost, *caps in CATALOG:
-        passes = (budget <= 0 or cost <= budget)
-        score = sum(w * c for w, c in zip(weights, caps))
-        rows.append((model, score, cost, passes))
-    rows.sort(key=lambda r: (-r[3], -r[1]))  # budget-passing first, then score
+    for (model, c_in, c_out, lat, fail, *caps), blended in zip(CATALOG, costs):
+        passes = (budget <= 0 or c_in <= budget)
+
+        if wsum < 1e-9:
+            capability = 0.75  # no task hint: Go returns constant 0.75
+        else:
+            capability = sum(w * c for w, c in zip(weights, caps)) / wsum
+
+        norm_cost = _normalize(blended,  min_cost, max_cost)
+        norm_lat  = _normalize(lat, min_lat,  max_lat)
+        utility   = _W_CAP * capability - _W_COST * norm_cost - _W_LAT * norm_lat - _W_FAIL * fail
+
+        rows.append((model, utility, c_in, passes))
+
+    rows.sort(key=lambda r: (-r[3], -r[1]))  # budget-passing first, then utility
     return rows
 
 # ── Scenarios ─────────────────────────────────────────────────────────────────
@@ -421,11 +460,11 @@ def scenario_auto_routing(port):
         rows = explain_routing(task, budget)
         winner = next((r for r in rows if r[3]), None)
         print(f"  {bold(task.upper())}  {dim(hdrs)}")
-        for model, score, cost, passes in rows[:4]:
+        for model, utility, cost_in, passes in rows[:4]:
             marker = green("-> SELECTED") if (winner and model == winner[0]) else dim("         ")
-            cost_s = f"${cost:.2f}/1M" if cost > 0 else "free"
+            cost_s = f"${cost_in:.3f}/1M" if cost_in > 0 else "free"
             budget_s = "" if passes else red(" [over budget]")
-            print(f"     {marker}  {model:<22} score={score:.2f}  {cost_s}{budget_s}")
+            print(f"     {marker}  {model:<26} utility={utility:.3f}  {cost_s}{budget_s}")
         if not winner:
             print(f"     {red('No model passed the budget filter.')}")
         print()
@@ -731,16 +770,17 @@ def interactive_chat(port, providers, has_shadow):
             rows = explain_routing(task, 0.0)
             winner = rows[0] if rows else None
             if winner:
+                cost_s = f"${winner[2]:.3f}/1M" if winner[2] > 0 else "free"
                 print(f"  {dim('ixr scoring -> selected:')} {bold(winner[0])}  "
-                      f"{dim(f'(score={winner[1]:.2f}, ${winner[2]:.2f}/1M)')}")
+                      f"{dim(f'(utility={winner[1]:.3f}, {cost_s})')}")
+            extra = {"X-IXR-UseCase": "demo-interactive"}
+            if task != "general":
+                extra["X-IXR-Task"] = task
             pos = _log_pos()
             resp, lat, err = chat(port, {
                 "model": "auto",
                 "messages": [{"role": "user", "content": question}],
-            }, extra_headers={
-                "X-IXR-Task": task,
-                "X-IXR-UseCase": "demo-interactive",
-            })
+            }, extra_headers=extra)
             label = f"AUTO -> {resp.get('model', '?')}" if resp else "AUTO"
             response_box(label, resp, lat, err)
             if err and "no provider" in (err or ""):
