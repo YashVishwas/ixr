@@ -81,9 +81,22 @@ func (e *Executor) Run(
 		}
 
 		// Build the messages for this stage: shared history + optional injected prompt.
-		stageMsgs := msgs
-		if stage.Prompt != "" {
+		// When the conversation ends with an assistant turn (a prior stage's reply),
+		// most providers require the last message to be from the user. In that case
+		// we add the stage prompt as a user message rather than a system message.
+		// For the first stage (no prior replies) we prepend it as a system message.
+		var stageMsgs []schema.Message
+		endsWithAssistant := len(msgs) > 0 && msgs[len(msgs)-1].Role == "assistant"
+		if endsWithAssistant {
+			continuation := stage.Prompt
+			if continuation == "" {
+				continuation = "Please continue."
+			}
+			stageMsgs = append(msgs, schema.Message{Role: "user", Content: continuation})
+		} else if stage.Prompt != "" {
 			stageMsgs = append([]schema.Message{{Role: "system", Content: stage.Prompt}}, msgs...)
+		} else {
+			stageMsgs = msgs
 		}
 
 		stageReq := schema.RequestEnvelope{
