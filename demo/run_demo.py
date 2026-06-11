@@ -838,7 +838,7 @@ def interactive_chat(port, providers, has_shadow):
         elif mode == "4":
             NAMED_STAGES = {"fast-refine": 2, "smart-qa": 2, "debate": 3}
             print(f"  Named chains: {bold('fast-refine')}  {bold('smart-qa')}  {bold('debate')}")
-            print(f"  Or inline:    {dim('gpt-oss-120b,zai-glm-4.7')}")
+            print(f"  Inline (comma-separated models): {dim('gpt-oss-120b,zai-glm-4.7')}")
             try:
                 chain_input = input(f"  {cyan('Chain:')} ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -860,6 +860,9 @@ def interactive_chat(port, providers, has_shadow):
             }, timeout=90)
 
             response_box(f"Chain: {chain_input}", resp, lat, err)
+
+            if err:
+                continue
 
             events = read_events_after(pos, stage_count, timeout=max(30.0, stage_count * 15.0))
             for ev in events:
