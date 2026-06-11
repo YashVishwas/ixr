@@ -21,8 +21,10 @@ $Port          = 8088
 $WorktreeBase  = Join-Path $env:TEMP "ixr-demo-windows-docker"
 $ContainerName = "ixr-demo-windows"
 $ImageTag      = "ixr-demo:windows"
+$LogFile = Join-Path $env:TEMP "ixr-windows-docker.log"
 $Script:Branch = ""
 $Script:WorktreeBaseOverride = $WorktreeBase
+$Script:DockerLogProcess = $null
 
 function Write-Bold  { param($Text) Write-Host $Text -NoNewline }
 function Write-Cyan  { param($Text) Write-Host $Text -ForegroundColor Cyan -NoNewline }
@@ -49,6 +51,9 @@ function Check-Docker {
 }
 
 function Invoke-Cleanup {
+  if ($Script:DockerLogProcess -and -not $Script:DockerLogProcess.HasExited) {
+    try { $Script:DockerLogProcess.Kill() } catch {}
+  }
   docker stop $ContainerName 2>$null
   docker rm   $ContainerName 2>$null
   $base = $Script:WorktreeBaseOverride
@@ -213,6 +218,8 @@ function Start-IxrServer {
     } catch {}
   }
   Write-Host "  " -NoNewline; Write-Green "ixr running in Docker ($ContainerName) -> http://localhost:${Port}"; Write-Host ""
+  $Script:DockerLogProcess = Start-Process "docker" -ArgumentList @("logs", "-f", $ContainerName) `
+    -RedirectStandardOutput $LogFile -NoNewWindow -PassThru
 }
 
 function Get-Python {
@@ -239,7 +246,7 @@ try {
   Write-Host "    Running demo scenarios..."; Write-Host "  ─────────────────────────────────────────────"; Write-Host ""
 
   $python = Get-Python
-  & $python (Join-Path $DemoDir "run_demo.py") --port $Port --branch $Script:Branch --log /dev/null
+  & $python (Join-Path $DemoDir "run_demo.py") --port $Port --branch $Script:Branch --log $LogFile
 
   Write-Host ""; Write-Host "  " -NoNewline; Write-Green "Demo complete."; Write-Host ""
   Write-Host "  Container logs: docker logs $ContainerName"; Write-Host ""

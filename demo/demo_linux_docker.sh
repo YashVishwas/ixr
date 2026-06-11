@@ -16,6 +16,8 @@ WORKTREE_BASE="/tmp/ixr-demo-linux-docker"
 CONTAINER_NAME="ixr-demo-linux"
 IMAGE_TAG="ixr-demo:linux"
 DOCKER_PLATFORM="linux/amd64"
+LOG_FILE="/tmp/ixr-linux-docker.log"
+DOCKER_LOG_PID=""
 
 bold()  { printf '\033[1m%s\033[0m' "$*"; }
 cyan()  { printf '\033[1;36m%s\033[0m' "$*"; }
@@ -48,6 +50,9 @@ check_docker() {
 }
 
 cleanup() {
+  if [[ -n "$DOCKER_LOG_PID" ]] && kill -0 "$DOCKER_LOG_PID" 2>/dev/null; then
+    kill "$DOCKER_LOG_PID" 2>/dev/null || true
+  fi
   docker stop "$CONTAINER_NAME" 2>/dev/null || true
   docker rm   "$CONTAINER_NAME" 2>/dev/null || true
   if [[ -d "$WORKTREE_BASE" ]] && [[ "$WORKTREE_BASE" != "$REPO_ROOT" ]]; then
@@ -205,6 +210,8 @@ start_server() {
     fi
   done
   echo "  $(green "ixr running in Docker (${CONTAINER_NAME}) -> http://localhost:${PORT}")"
+  docker logs -f "$CONTAINER_NAME" > "$LOG_FILE" 2>&1 &
+  DOCKER_LOG_PID=$!
 }
 
 echo ""
@@ -219,5 +226,5 @@ if [[ $# -ge 1 ]]; then BRANCH="$1"; echo "  Using branch: $(cyan "$BRANCH")"; e
 setup_worktree; build_ixr; write_demo_config; start_server
 
 echo ""; echo "  $(bold '─────────────────────────────────────────────')"; echo "  $(bold '  Running demo scenarios...')"; echo "  $(bold '─────────────────────────────────────────────')"
-python3 "$DEMO_DIR/run_demo.py" --port "$PORT" --branch "$BRANCH" --log /dev/null
+python3 "$DEMO_DIR/run_demo.py" --port "$PORT" --branch "$BRANCH" --log "$LOG_FILE"
 echo ""; echo "  $(green 'Demo complete.')"; echo "  Container logs: docker logs $CONTAINER_NAME"; echo ""
