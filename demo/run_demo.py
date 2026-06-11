@@ -315,7 +315,7 @@ def show_event(ev, client_lat_ms=None):
     kv("usage.completion_tokens", str(usage.get("completion_tokens", "?")))
     kv("usage.total_tokens",      str(usage.get("total_tokens", "?")))
 
-    for choice in resp.get("choices", []):
+    for choice in (resp.get("choices") or []):
         idx     = choice.get("index", 0)
         msg_c   = choice.get("message", {})
         content = str(msg_c.get("content") or "")
@@ -340,13 +340,13 @@ def show_event(ev, client_lat_ms=None):
 
 # Mirrors the catalog in internal/domain/routing/router.go
 CATALOG = [
-    ("claude-opus-4.7",   5.00,  0.98, 0.90, 0.99, 0.88),
-    ("gpt-5.2",           1.50,  0.94, 0.93, 0.95, 0.86),
-    ("gpt-5.3-codex",     1.75,  0.84, 0.98, 0.88, 0.78),
-    ("gemini-3.1-pro",    2.00,  0.96, 0.88, 1.00, 0.94),
-    ("deepseek-v3-0324",  0.27,  0.84, 0.78, 0.88, 0.76),
-    ("llama-4-scout",     0.11,  0.76, 0.70, 0.78, 0.74),
-    ("gemma-3-27b",       0.07,  0.68, 0.62, 0.70, 0.72),
+    ("claude-sonnet-4-6",       3.00,  0.95, 0.92, 0.95, 0.90),
+    ("gpt-4o-mini",             0.15,  0.85, 0.88, 0.87, 0.82),
+    ("gemini-1.5-flash",        0.075, 0.84, 0.82, 0.86, 0.92),
+    ("deepseek-chat",           0.27,  0.83, 0.85, 0.88, 0.76),
+    ("llama-3.3-70b-versatile", 0.0,   0.80, 0.76, 0.80, 0.76),
+    ("gpt-oss-120b",            0.0,   0.74, 0.72, 0.75, 0.72),
+    ("zai-glm-4.7",             0.0,   0.68, 0.65, 0.68, 0.80),
 ]
 # columns: model, cost/1M, reasoning, coding, math, multilingual
 

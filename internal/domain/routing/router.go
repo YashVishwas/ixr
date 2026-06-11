@@ -62,102 +62,102 @@ type ModelCard struct {
 
 var catalog = []ModelCard{
 	{
-		ID: "claude-opus-4.7",
+		ID: "claude-sonnet-4-6",
 
-		InputUSDPer1M:  5,
-		OutputUSDPer1M: 25,
+		InputUSDPer1M:  3.00,
+		OutputUSDPer1M: 15.00,
 
-		LatencySec:  1.8,
+		LatencySec:  1.2,
 		FailureRate: 0.02,
 
-		Reasoning:    0.98,
-		Coding:       0.90,
-		Math:         0.99,
-		Multilingual: 0.88,
+		Reasoning:    0.95,
+		Coding:       0.92,
+		Math:         0.95,
+		Multilingual: 0.90,
 	},
 	{
-		ID: "gpt-5.2",
+		ID: "gpt-4o-mini",
 
-		InputUSDPer1M:  1.5,
-		OutputUSDPer1M: 14,
+		InputUSDPer1M:  0.15,
+		OutputUSDPer1M: 0.60,
+
+		LatencySec:  0.5,
+		FailureRate: 0.025,
+
+		Reasoning:    0.85,
+		Coding:       0.88,
+		Math:         0.87,
+		Multilingual: 0.82,
+	},
+	{
+		ID: "gemini-1.5-flash",
+
+		InputUSDPer1M:  0.075,
+		OutputUSDPer1M: 0.30,
 
 		LatencySec:  0.6,
 		FailureRate: 0.025,
 
-		Reasoning:    0.94,
-		Coding:       0.93,
-		Math:         0.95,
-		Multilingual: 0.86,
-	},
-	{
-		ID: "gpt-5.3-codex",
-
-		InputUSDPer1M:  1.75,
-		OutputUSDPer1M: 14,
-
-		LatencySec:  0.003,
-		FailureRate: 0.03,
-
 		Reasoning:    0.84,
-		Coding:       0.98,
-		Math:         0.88,
-		Multilingual: 0.78,
+		Coding:       0.82,
+		Math:         0.86,
+		Multilingual: 0.92,
 	},
 	{
-		ID: "gemini-3.1-pro",
-
-		InputUSDPer1M:  2,
-		OutputUSDPer1M: 12,
-
-		LatencySec:  30.3,
-		FailureRate: 0.022,
-
-		Reasoning:    0.96,
-		Coding:       0.88,
-		Math:         1.00,
-		Multilingual: 0.94,
-	},
-	{
-		ID: "deepseek-v3-0324",
+		ID: "deepseek-chat",
 
 		InputUSDPer1M:  0.27,
 		OutputUSDPer1M: 1.10,
 
-		LatencySec:  4,
+		LatencySec:  2.0,
 		FailureRate: 0.035,
 
-		Reasoning:    0.84,
-		Coding:       0.78,
+		Reasoning:    0.83,
+		Coding:       0.85,
 		Math:         0.88,
 		Multilingual: 0.76,
 	},
 	{
-		ID: "llama-4-scout",
+		ID: "llama-3.3-70b-versatile",
 
-		InputUSDPer1M:  0.11,
-		OutputUSDPer1M: 0.34,
+		InputUSDPer1M:  0,
+		OutputUSDPer1M: 0,
 
-		LatencySec:  0.33,
+		LatencySec:  0.8,
 		FailureRate: 0.04,
 
-		Reasoning:    0.76,
-		Coding:       0.70,
-		Math:         0.78,
-		Multilingual: 0.74,
+		Reasoning:    0.80,
+		Coding:       0.76,
+		Math:         0.80,
+		Multilingual: 0.76,
 	},
 	{
-		ID: "gemma-3-27b",
+		ID: "gpt-oss-120b",
 
-		InputUSDPer1M:  0.07,
-		OutputUSDPer1M: 0.07,
+		InputUSDPer1M:  0,
+		OutputUSDPer1M: 0,
 
-		LatencySec:  0.72,
+		LatencySec:  0.5,
+		FailureRate: 0.04,
+
+		Reasoning:    0.74,
+		Coding:       0.72,
+		Math:         0.75,
+		Multilingual: 0.72,
+	},
+	{
+		ID: "zai-glm-4.7",
+
+		InputUSDPer1M:  0,
+		OutputUSDPer1M: 0,
+
+		LatencySec:  0.4,
 		FailureRate: 0.045,
 
 		Reasoning:    0.68,
-		Coding:       0.62,
-		Math:         0.70,
-		Multilingual: 0.72,
+		Coding:       0.65,
+		Math:         0.68,
+		Multilingual: 0.80,
 	},
 }
 
