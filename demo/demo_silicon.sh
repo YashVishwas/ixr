@@ -29,7 +29,7 @@ cleanup() {
     echo "  Stopping ixr server (PID $SERVER_PID)..."
     kill "$SERVER_PID" 2>/dev/null || true
   fi
-  if [[ -d "$WORKTREE_BASE" ]]; then
+  if [[ -d "$WORKTREE_BASE" ]] && [[ "$WORKTREE_BASE" != "$REPO_ROOT" ]]; then
     echo "  Removing worktree $WORKTREE_BASE..."
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_BASE" 2>/dev/null || rm -rf "$WORKTREE_BASE"
   fi
@@ -102,6 +102,15 @@ setup_worktree() {
   echo ""
   echo "  $(bold "Setting up worktree for branch:") $(cyan "$BRANCH")"
 
+  # If the selected branch is already checked out here, run in place.
+  local current_branch
+  current_branch=$(git -C "$REPO_ROOT" branch --show-current 2>/dev/null || echo "")
+  if [[ "$current_branch" == "$BRANCH" ]]; then
+    echo "  Branch is the current worktree — running from $REPO_ROOT"
+    WORKTREE_BASE="$REPO_ROOT"
+    return
+  fi
+
   # Remove stale worktree if it exists
   if [[ -d "$WORKTREE_BASE" ]]; then
     git -C "$REPO_ROOT" worktree remove --force "$WORKTREE_BASE" 2>/dev/null || rm -rf "$WORKTREE_BASE"
@@ -166,6 +175,31 @@ providers:
     base_url: \${OLLAMA_BASE_URL}
   llamacpp:
     base_url: \${LLAMACPP_BASE_URL}
+
+chains:
+  fast-refine:
+    models:
+      - gpt-oss-120b
+      - zai-glm-4.7
+    prompts:
+      - ""
+      - "Improve the previous answer: fix any inaccuracies and make it more concise."
+  smart-qa:
+    models:
+      - gpt-oss-120b
+      - zai-glm-4.7
+    prompts:
+      - ""
+      - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
+  debate:
+    models:
+      - gpt-oss-120b
+      - zai-glm-4.7
+      - gpt-oss-120b
+    prompts:
+      - ""
+      - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
+      - "Synthesize the two perspectives above into the best possible answer."
 YAML
 }
 
