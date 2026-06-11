@@ -749,27 +749,51 @@ def interactive_chat(port, providers, has_shadow):
             show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
         elif mode == "3":
-            if not secondary:
+            if len(providers) < 2:
                 note("Only one provider is configured — can't compare. Add a second API key.")
             else:
-                _, sm, spname, smshort, _ = secondary
-                print(f"  {dim('Firing')} {bold(ppname + '/' + pmshort)} {dim('and')} "
-                      f"{bold(spname + '/' + smshort)} {dim('in parallel...')}")
+                print()
+                print(f"  {bold('Available models:')}")
+                for i, (_, m, pname, mshort, free) in enumerate(providers):
+                    tier = green("free") if free else yellow("paid")
+                    print(f"    [{i+1}] {pname}/{mshort}  [{tier}]")
+                print(f"    [a] All")
+                try:
+                    sel = input(f"  {cyan('Pick models to compare (e.g. 1,2 or a):')} ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+
+                if sel in ("a", "all") or sel == "":
+                    selected = providers
+                else:
+                    indices = []
+                    for part in sel.split(","):
+                        part = part.strip()
+                        if part.isdigit():
+                            idx = int(part) - 1
+                            if 0 <= idx < len(providers):
+                                indices.append(idx)
+                    selected = [providers[i] for i in indices] if len(indices) >= 2 else providers[:2]
+
+                print(f"\n  {dim(f'Firing {len(selected)} model(s) in parallel...')}")
                 pos = _log_pos()
                 results = chat_parallel(port, [
-                    ({"model": pm, "messages": [{"role": "user", "content": question}]}, {}),
-                    ({"model": sm, "messages": [{"role": "user", "content": question}]}, {}),
+                    ({"model": m, "messages": [{"role": "user", "content": question}]}, {})
+                    for _, m, _, _, _ in selected
                 ])
-                raw_events = read_events_after(pos, 2)
+                raw_events = read_events_after(pos, len(selected))
                 events_by_id = {ev.get("id", ""): ev for ev in raw_events}
 
-                response_box(f"{ppname}/{pmshort}", *results[0])
-                ev0 = events_by_id.get((results[0][0] or {}).get("id", "")) if results[0][0] else None
-                show_event(ev0, client_lat_ms=results[0][1] * 1000 if results[0][1] is not None else None)
-
-                response_box(f"{spname}/{smshort}", *results[1])
-                ev1 = events_by_id.get((results[1][0] or {}).get("id", "")) if results[1][0] else None
-                show_event(ev1, client_lat_ms=results[1][1] * 1000 if results[1][1] is not None else None)
+                for i, ((_, m, pname, mshort, free), (resp, lat, err)) in enumerate(zip(selected, results)):
+                    tier = green("free") if free else yellow("paid")
+                    print()
+                    print(f"  {bold('═' * 58)}")
+                    print(f"  {bold(f'  Model {i+1}/{len(selected)}  ·  {pname}/{mshort}')}  [{tier}]")
+                    print(f"  {bold('═' * 58)}")
+                    response_box(f"{pname}/{mshort}", resp, lat, err)
+                    ev = events_by_id.get((resp or {}).get("id", "")) if resp else None
+                    show_event(ev, client_lat_ms=lat * 1000 if lat is not None else None)
 
         elif mode == "4":
             NAMED_STAGES = {"fast-refine": 2, "smart-qa": 2, "debate": 3}
