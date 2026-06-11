@@ -152,6 +152,12 @@ func Start(opts ...Option) error {
 				return nil, fmt.Errorf("cerebras provider not configured (use CEREBRAS_API_KEY or ixr.yaml providers.cerebras)")
 			}
 			return p, nil
+		case strings.HasPrefix(m, "zai-"):
+			p, ok := registry["cerebras"]
+			if !ok {
+				return nil, fmt.Errorf("cerebras provider not configured (use CEREBRAS_API_KEY or ixr.yaml providers.cerebras)")
+			}
+			return p, nil
 		case strings.HasPrefix(m, "glm-"):
 			p, ok := registry["zhipu"]
 			if !ok {

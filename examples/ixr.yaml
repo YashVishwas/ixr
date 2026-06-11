@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8090
 
 log_level: info
 
@@ -52,8 +52,8 @@ chains:
   # fast-refine: two free models; Cerebras drafts, Groq/Llama refines.
   fast-refine:
     models:
-      - qwen3-8b
-      - llama-3.1-8b-instant
+      - gpt-oss-120b
+      - zai-glm-4.7
     prompts:
       - ""
       - "Improve the previous answer: fix any inaccuracies and make it more concise."
@@ -61,7 +61,7 @@ chains:
   # debate: three models tackle the same question and the last synthesizes.
   debate:
     models:
-      - qwen3-8b
+      - gpt-oss-120b
       - mistral-small-latest
       - claude-sonnet-4-6
     prompts:
