@@ -239,7 +239,14 @@ func capabilityMatch(m ModelCard, hint TaskHint) float64 {
 
 // Route selects the single best catalog model for the given hint.
 // It returns "" when no model satisfies a positive MaxCostUSDPer1M cap.
+// All catalog models are considered; use RouteFrom to restrict to available ones.
 func Route(hint TaskHint) string {
+	return RouteFrom(hint, nil)
+}
+
+// RouteFrom is like Route but only considers models for which canRoute returns true.
+// Pass nil to consider all catalog models (identical to Route).
+func RouteFrom(hint TaskHint, canRoute func(string) bool) string {
 	costs := make([]float64, len(catalog))
 	latencies := make([]float64, len(catalog))
 
@@ -265,6 +272,10 @@ func Route(hint TaskHint) string {
 	var picks []scored
 
 	for i, m := range catalog {
+		if canRoute != nil && !canRoute(m.ID) {
+			continue
+		}
+
 		cost := costs[i]
 
 		if hint.MaxCostUSDPer1M > 0 && cost > hint.MaxCostUSDPer1M {

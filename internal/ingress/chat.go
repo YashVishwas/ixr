@@ -95,9 +95,12 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// ── Single-model path (unchanged) ─────────────────────────────────────
 		if req.Model == "auto" {
-			resolved := routing.Route(hint)
+			resolved := routing.RouteFrom(hint, func(m string) bool {
+				_, err := h.router(m)
+				return err == nil
+			})
 			if resolved == "" {
-				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
+				writeError(w, http.StatusBadRequest, "auto_route_failed", "no configured provider matched the given budget and task constraints")
 				return
 			}
 			req.Model = resolved
