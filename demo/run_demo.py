@@ -635,7 +635,7 @@ def scenario_chain(port, providers):
     question    = "Explain what a hash table is and when to use one."
 
     print(f"  Prompt: {bold(repr(question))}")
-    print(f"  Chain:  {bold(chain_name)}  {dim('(gpt-oss-120b drafts → zai-glm-4.7 refines)')}\n")
+    print(f"  Chain:  {bold(chain_name)}  {dim('(llama-3.3-70b-versatile drafts → mistral-small-latest refines)')}\n")
 
     pos = _log_pos()
     resp, lat, err = chat(port, {

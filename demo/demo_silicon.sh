@@ -179,22 +179,22 @@ providers:
 chains:
   fast-refine:
     models:
-      - gpt-oss-120b
-      - zai-glm-4.7
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
     prompts:
       - ""
       - "Improve the previous answer: fix any inaccuracies and make it more concise."
   smart-qa:
     models:
+      - llama-3.3-70b-versatile
       - gpt-oss-120b
-      - zai-glm-4.7
     prompts:
       - ""
       - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
   debate:
     models:
-      - gpt-oss-120b
-      - zai-glm-4.7
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
       - gpt-oss-120b
     prompts:
       - ""

@@ -49,21 +49,21 @@ chains:
       - ""
       - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
 
-  # fast-refine: two free models; Cerebras drafts, Groq/Llama refines.
+  # fast-refine: Groq drafts, Mistral refines.
   fast-refine:
     models:
-      - gpt-oss-120b
-      - zai-glm-4.7
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
     prompts:
       - ""
       - "Improve the previous answer: fix any inaccuracies and make it more concise."
 
-  # debate: three models tackle the same question and the last synthesizes.
+  # debate: three different providers tackle the same question and the last synthesizes.
   debate:
     models:
-      - gpt-oss-120b
+      - llama-3.3-70b-versatile
       - mistral-small-latest
-      - claude-sonnet-4-6
+      - gpt-oss-120b
     prompts:
       - ""
       - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
