@@ -719,7 +719,7 @@ def interactive_chat(port, providers, has_shadow):
     section("Interactive chat")
     note("ixr is still running. Try it yourself.\n")
 
-    primary = providers[0]
+    primary = next((p for p in providers if p[1] == "claude-sonnet-4-6"), providers[0])
     secondary = providers[1] if len(providers) > 1 else None
     _, pm, ppname, pmshort, _ = primary
 
