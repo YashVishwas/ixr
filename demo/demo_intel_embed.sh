@@ -97,13 +97,13 @@ setup_worktree() {
 write_embed_app() {
   mkdir -p "$EMBED_APP_DIR"
   cat > "$EMBED_APP_DIR/main.go" << 'GOEOF'
-// demo-embed: shows ixr running as a goroutine inside a host Go service.
-// Same binary, same process — no separate ixr executable required.
+// demo-embed: shows ixr running inside a host Go service — same binary, same process.
 package main
 
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -119,26 +119,28 @@ func main() {
 	}
 	configFile := os.Getenv("IXR_CONFIG_FILE")
 
-	go func() {
-		if err := ixr.Start(
-			ixr.WithPort(port),
-			ixr.WithConfigFile(configFile),
-		); err != nil {
-			log.Fatalf("ixr: %v", err)
-		}
-	}()
-
-	appPort := port + 1000
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "host app healthy — ixr embedded on :%d\n", port)
 	})
+	go func() {
+		ln, err := net.Listen("tcp", ":0")
+		if err != nil {
+			log.Printf("host app (optional): %v", err)
+			return
+		}
+		appPort := ln.Addr().(*net.TCPAddr).Port
+		log.Printf("host app on :%d — ixr embedded on :%d\n", appPort, port)
+		http.Serve(ln, mux)
+	}()
 
-	time.Sleep(300 * time.Millisecond)
-	log.Printf("host app on :%d — ixr embedded on :%d\n", appPort, port)
+	time.Sleep(100 * time.Millisecond)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", appPort), mux); err != nil {
-		log.Fatal(err)
+	if err := ixr.Start(
+		ixr.WithPort(port),
+		ixr.WithConfigFile(configFile),
+	); err != nil {
+		log.Fatalf("ixr: %v", err)
 	}
 }
 GOEOF
