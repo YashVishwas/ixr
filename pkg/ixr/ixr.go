@@ -129,7 +129,14 @@ func Start(opts ...Option) error {
 	// --- Semantic cache ---
 	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
-	responseCache := cache.NewMemory(cacheSize, cacheTTL)
+	exactCache := &cache.ExactCache{Memory: cache.NewMemory(cacheSize, cacheTTL)}
+
+	var responseCache cache.RequestAwareCache = exactCache
+	if os.Getenv("IXR_SEMANTIC_CACHE") == "true" {
+		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
+		defer semanticBackend.Close()
+		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, 0.92)
+	}
 
 	// --- Chat handler ---
 	chatHandler := ingress.NewChatHandler(
