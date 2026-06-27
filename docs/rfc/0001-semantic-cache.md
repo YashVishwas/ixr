@@ -66,6 +66,7 @@ New behaviour is added as plugins that consume `CallEvent` from the bus (async, 
 | Routing + fallback chains | `internal/domain/routing/` | Router, scorer, fallback, filter |
 | Exact-match response cache | `internal/domain/cache/cache.go` | SHA-256 keyed |
 | Semantic response cache | `internal/domain/cache/semantic*.go` | Two-layer; file-journal persistence |
+| Session continuity | `internal/domain/session/`, `internal/ingress/session_middleware.go` | Cross-request history; delta journal; `X-IXR-Session-ID` header |
 | Multi-tenancy + per-tenant credentials | `internal/domain/tenant/` | Per-tenant rate limits and provider keys |
 | Intent parsing | `internal/domain/intent/` | Taxonomy + parser + complexity scoring |
 | Bandit scoring engine | `internal/domain/scoring/` | Epsilon-greedy/UCB, reward, regret tracking |
@@ -293,6 +294,114 @@ Limits are configurable per scope level. Spend accumulated by `OnEvent` is keyed
 
 ---
 
+### Gap 9 — User Memory & Cross-Session Context
+
+**What it is:** A user-level memory store that extracts facts, preferences, and context from conversation history, persists them keyed by user identity, and injects relevant memories into new sessions via the system prompt — giving the gateway a persistent model of each user across all their conversations.
+
+**Why it matters:** Session continuity (Gap 9's prerequisite, implemented on `feat/session-continuity`) keeps a single conversation thread alive across HTTP requests. But when that session ends and a new one starts, everything is forgotten. Users have to re-establish their context every time — their name, preferences, what they were working on. ChatGPT's memory feature demonstrates that users expect AI infrastructure to remember them. For enterprise deployments, this is the difference between a stateless proxy and an intelligent assistant layer that compounds value over time.
+
+The three questions this closes:
+1. *Are messages stored permanently?* — Yes, as distilled memories, not raw transcripts.
+2. *Does ixr build a profile around me?* — Yes, `UserMemoryStore` accumulates facts per user identity.
+3. *Can I use context from a previous session in a new one?* — Yes, relevant memories are injected at the start of each new session.
+
+**Design sketch:**
+
+Three components, each building on existing infrastructure:
+
+**1. `internal/domain/memory/memory.go` — `UserMemoryStore`**
+
+```go
+// MemoryEntry is one extracted fact about a user.
+type MemoryEntry struct {
+    ID        string    `json:"id"`
+    UserKey   string    `json:"user_key"`   // tenantID:userID
+    Content   string    `json:"content"`    // "User's name is Arun"
+    Tags      []string  `json:"tags"`       // ["name", "identity"]
+    CreatedAt time.Time `json:"created_at"`
+    UpdatedAt time.Time `json:"updated_at"`
+}
+
+type UserMemoryStore interface {
+    // Store saves an extracted memory for a user.
+    Store(ctx context.Context, entry MemoryEntry) error
+    // Retrieve returns the N most relevant memories for the given context text.
+    // Uses semantic similarity so "what's my name?" retrieves name-related memories.
+    Retrieve(ctx context.Context, userKey string, contextText string, topN int) ([]MemoryEntry, error)
+    // List returns all memories for a user (for inspection/deletion).
+    List(ctx context.Context, userKey string) ([]MemoryEntry, error)
+    // Delete removes a specific memory by ID.
+    Delete(ctx context.Context, id string) error
+}
+```
+
+The `Retrieve` method uses the existing `SemanticBackend` interface from `internal/domain/cache/semantic.go` — memories are stored as embeddings alongside their text, and retrieval is a cosine similarity scan over the user's memory pool. This is the same `WordVectorizer` + `MemorySemanticBackend` infrastructure already built, scoped per user rather than per request.
+
+**2. `internal/domain/memory/extractor.go` — `MemoryExtractor`**
+
+```go
+type MemoryExtractor interface {
+    // Extract derives zero or more memory entries from a completed conversation turn.
+    Extract(ctx context.Context, userKey string, turn ConversationTurn) ([]MemoryEntry, error)
+}
+
+type ConversationTurn struct {
+    UserMessage      string
+    AssistantMessage string
+    SessionID        string
+}
+```
+
+Two implementations:
+
+- **`RuleExtractor`** — regex-based patterns for high-confidence facts: name introductions ("my name is", "I'm called"), stated preferences ("I prefer", "I always", "I usually"), explicit facts ("I work at", "I live in", "I'm a"). Zero LLM calls, sub-millisecond. High precision, limited recall.
+
+- **`LLMExtractor`** — sends the turn to a cheap, fast model (e.g. `gpt-4o-mini`) with a structured prompt asking it to extract memorable facts as a JSON array. Higher recall, costs one small LLM call per turn. The call is made asynchronously post-response so it never adds latency.
+
+**3. Injection point — `SessionMiddleware` extension**
+
+The `SessionMiddleware` already runs at the start of each request. When a user memory store is configured, it adds one step before injecting session history:
+
+```
+1. Load session history (existing)
+2. If session is new (no history loaded):
+   a. Retrieve top-K relevant memories for this user
+   b. Format as a system message: "What you know about this user: ..."
+   c. Prepend system message before the session history
+3. Inject history into request (existing)
+```
+
+Memories are only injected at the start of a new session — not on every turn — to avoid bloating context unnecessarily.
+
+**Pipeline with memory:**
+
+```
+Request (new session)
+  ↓
+SessionMiddleware
+  ├─ Load session history → empty (new session)
+  ├─ Retrieve user memories → ["User's name is Arun", "Prefers concise answers", ...]
+  ├─ Format system message → prepend to messages
+  └─ Pass enriched request to cache → chat handler
+```
+
+**Persistence:** same delta-journal pattern as `SessionStore` — `memories.jsonl` per user, append on extract, compact on startup. No external service required.
+
+**User key:** `tenantID:userID` from `identity.FromContext(ctx)`. Requires `X-IXR-UserID` header (already supported by the identity resolver). Sessions without a `UserID` don't accumulate memories.
+
+**Extraction timing:** asynchronous, post-response, via the existing event bus. The `SessionMiddleware` publishes a `TurnEvent` after appending to the session store; a `MemoryPlugin` (implements `EventConsumer`) receives it, runs extraction, and writes to `UserMemoryStore`. Extraction never adds latency.
+
+**Configuration:**
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `IXR_MEMORY=true` | *(unset)* | Enable user memory extraction and injection |
+| `IXR_MEMORY_DIR` | *(unset)* | Journal directory; empty = memory-only |
+| `IXR_MEMORY_TOP_K` | `5` | Max memories injected per new session |
+| `IXR_MEMORY_EXTRACTOR` | `rule` | `rule` or `llm` |
+
+---
+
 ## Plugin Architecture as the Extension Model
 
 The gaps above split into two categories by when they need to run:
@@ -303,7 +412,7 @@ The gaps above split into two categories by when they need to run:
 
 The `RequestInterceptor` interface (Gap 1) is the only new abstraction needed to address five of the seven remaining gaps. Everything else is either an existing plugin type or a change internal to a provider adapter.
 
-The ingress pipeline with both interfaces wired looks like:
+The ingress pipeline with all interfaces wired looks like:
 
 ```
 POST /v1/chat/completions
@@ -312,15 +421,19 @@ POST /v1/chat/completions
         ↓
    [RequestInterceptor chain]  ← PII guardrail, budget gate  (sync, pre-call)
         ↓
+   SessionMiddleware            ← inject user memories (new session) + history (all turns)
+        ↓
    cache lookup
         ↓
    scoring engine → provider call
         ↓
    response to caller
         ↓
+   SessionMiddleware            ← append new turn to session store
+        ↓
    cache store (post-response)
         ↓
-   [EventConsumer bus]  ← budget accumulate, OTEL span, audit-log, telemetry  (async, post-call)
+   [EventConsumer bus]  ← memory extraction, budget accumulate, OTEL span, audit-log  (async, post-call)
 ```
 
 A plugin can implement one or both interfaces. The plugin manager registers it in the appropriate chain at startup.
@@ -435,13 +548,19 @@ These are real problems in the ecosystem. ixr will not absorb them.
 
 2. **Separate embedder for Store vs Lookup.** `SemanticCache` currently uses one `Embedder` for both paths. A provider-backed embedder on Store (better quality) with `WordVectorizer` on Lookup (zero latency) would improve hit rates without affecting the request path. The struct can accept two embedders; `NewSemanticCache` signature change needed.
 
-3. **`IXR_CACHE_THRESHOLD` env var.** The cosine similarity threshold is hardcoded at 0.92. Should be operator-configurable before the semantic cache is considered stable.
+3. ~~**`IXR_CACHE_THRESHOLD` env var.**~~ **Resolved** — `IXR_CACHE_THRESHOLD` is implemented on `semantic-cache` branch.
 
-4. **Journal compaction.** For processes running for weeks, the journal accumulates expired entries. A startup compaction pass (rewrite file without expired entries) is straightforward to add. Low priority until someone hits it in practice.
+4. ~~**Journal compaction.**~~ **Resolved** — startup compaction (temp+rename atomic rewrite) is implemented in both `PersistentSemanticBackend` and `PersistentSessionStore`.
 
 5. **Budget persistence format.** Gap 3 (budget enforcement) uses a similar file-journal pattern to the semantic cache. Should the two share a persistence abstraction, or remain independent implementations? Sharing reduces code but couples unrelated features.
 
 6. **Cross-instance cache.** A shared `SemanticBackend` (pgvector) behind the existing interface enables cache sharing across scaled deployments. The `SemanticBackend` interface already supports this — it is purely an implementation choice. When to add it depends on whether ixr targets single-instance or multi-instance deployments as the primary case.
+
+7. **Memory extraction quality vs. latency tradeoff.** The `RuleExtractor` is fast and free but misses implicit facts. The `LLMExtractor` catches more but costs a small LLM call per turn. Should the extractor be configurable per tenant, or a single global setting? A hybrid (rule-first, LLM only when rules find nothing) may be the right default.
+
+8. **Memory staleness and correction.** Users change — someone who said "I work at Acme" last year may work somewhere else now. There is no mechanism to update or invalidate an existing memory entry when a newer fact contradicts it. The `LLMExtractor` could detect contradictions and overwrite; the `RuleExtractor` cannot. This needs a resolution before memory is considered reliable.
+
+9. **Streaming session capture.** Streaming responses currently receive history injection but the response is not captured back into the session store (v1 constraint). A v2 SSE assembler that reconstructs the assistant turn from chunks would close this gap without buffering the stream for the client.
 
 ---
 
@@ -454,4 +573,7 @@ These are real problems in the ecosystem. ixr will not absorb them.
 - **Secrets rotation without restart** — Vault, AWS Secrets Manager, GCP Secret Manager for provider credentials.
 - **`model: "auto"` as default** — when no model is specified, the scoring engine picks. Currently requires explicit opt-in.
 - **Quality score in reward function** — the bandit scoring engine has a placeholder `δ * quality_score` term; wiring it requires a lightweight output quality signal (e.g. response length, format adherence, downstream error rate).
+- **User memory & cross-session context (Gap 9)** — `UserMemoryStore` + `MemoryExtractor` + injection via `SessionMiddleware`. `RuleExtractor` first, `LLMExtractor` as opt-in upgrade.
+- **Streaming session capture** — SSE assembler to reconstruct assistant turn from chunks and append to session store without buffering for the client.
+- **Memory management API** — `GET /v1/memory` and `DELETE /v1/memory/:id` endpoints so users can inspect and correct their stored memories.
 - **CNCF Sandbox submission** — the long-term governance target once the project reaches production stability across multiple adopters.
