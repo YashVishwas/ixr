@@ -179,12 +179,15 @@ func TestSemanticCache_ExactHitFirst(t *testing.T) {
 	resp := makeResp("exact-hit")
 	sc.Store(ctx, req, resp, time.Minute)
 
-	got, ok := sc.Lookup(ctx, req)
+	got, hit, ok := sc.Lookup(ctx, req)
 	if !ok {
 		t.Fatal("expected cache hit")
 	}
 	if got.ID != "exact-hit" {
 		t.Fatalf("got ID=%q, want exact-hit", got.ID)
+	}
+	if hit != CacheHitExact {
+		t.Fatalf("expected CacheHitExact, got %v", hit)
 	}
 }
 
@@ -201,12 +204,15 @@ func TestSemanticCache_SemanticFallback(t *testing.T) {
 
 	// Near-duplicate with one extra word — exact miss, semantic hit.
 	query := makeReq("gpt-4o", "please summarize this document for me quickly")
-	got, ok := sc.Lookup(ctx, query)
+	got, hit, ok := sc.Lookup(ctx, query)
 	if !ok {
 		t.Fatal("expected semantic cache hit on near-duplicate")
 	}
 	if got.ID != "sem-hit" {
 		t.Fatalf("got ID=%q, want sem-hit", got.ID)
+	}
+	if hit != CacheHitSemantic {
+		t.Fatalf("expected CacheHitSemantic, got %v", hit)
 	}
 }
 
@@ -219,9 +225,12 @@ func TestSemanticCache_Miss(t *testing.T) {
 
 	sc.Store(ctx, makeReq("gpt-4o", "summarize quarterly earnings"), makeResp("r1"), time.Minute)
 
-	_, ok := sc.Lookup(ctx, makeReq("gpt-4o", "write a haiku about mountains"))
+	_, hit, ok := sc.Lookup(ctx, makeReq("gpt-4o", "write a haiku about mountains"))
 	if ok {
 		t.Fatal("unrelated query should miss")
+	}
+	if hit != CacheHitNone {
+		t.Fatalf("expected CacheHitNone on miss, got %v", hit)
 	}
 }
 
@@ -233,11 +242,26 @@ func TestExactCache_RoundTrip(t *testing.T) {
 	resp := makeResp("ec-1")
 	exact.Store(ctx, req, resp, time.Minute)
 
-	got, ok := exact.Lookup(ctx, req)
+	got, hit, ok := exact.Lookup(ctx, req)
 	if !ok {
 		t.Fatal("expected hit")
 	}
 	if got.ID != "ec-1" {
 		t.Fatalf("got ID=%q, want ec-1", got.ID)
+	}
+	if hit != CacheHitExact {
+		t.Fatalf("expected CacheHitExact, got %v", hit)
+	}
+}
+
+func TestCacheHit_String(t *testing.T) {
+	if CacheHitExact.String() != "EXACT-HIT" {
+		t.Fatalf("unexpected: %s", CacheHitExact.String())
+	}
+	if CacheHitSemantic.String() != "SEMANTIC-HIT" {
+		t.Fatalf("unexpected: %s", CacheHitSemantic.String())
+	}
+	if CacheHitNone.String() != "MISS" {
+		t.Fatalf("unexpected: %s", CacheHitNone.String())
 	}
 }

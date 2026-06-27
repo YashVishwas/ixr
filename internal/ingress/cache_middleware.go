@@ -43,9 +43,9 @@ func (m *CacheMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if resp, ok := m.cache.Lookup(r.Context(), &req); ok {
-		slog.Debug("cache hit", "key", cache.Key(&req)[:8])
-		w.Header().Set("X-Cache", "HIT")
+	if resp, hit, ok := m.cache.Lookup(r.Context(), &req); ok {
+		slog.Debug("cache hit", "key", cache.Key(&req)[:8], "layer", hit)
+		w.Header().Set("X-Cache", hit.String())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 		return

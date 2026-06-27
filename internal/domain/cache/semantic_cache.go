@@ -9,11 +9,31 @@ import (
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
+// CacheHit indicates which cache layer produced a hit.
+type CacheHit uint8
+
+const (
+	CacheHitNone     CacheHit = iota
+	CacheHitExact             // SHA-256 exact match
+	CacheHitSemantic          // cosine-similarity match
+)
+
+func (h CacheHit) String() string {
+	switch h {
+	case CacheHitExact:
+		return "EXACT-HIT"
+	case CacheHitSemantic:
+		return "SEMANTIC-HIT"
+	default:
+		return "MISS"
+	}
+}
+
 // RequestAwareCache is the interface used by CacheMiddleware.
 // Implementations receive the full RequestEnvelope — not just a hash — so
 // semantic backends can embed the original prompt text.
 type RequestAwareCache interface {
-	Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, bool)
+	Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, CacheHit, bool)
 	Store(ctx context.Context, req *schema.RequestEnvelope, resp *schema.ResponseEnvelope, ttl time.Duration)
 }
 
@@ -21,8 +41,12 @@ type RequestAwareCache interface {
 // It is the default when no semantic backend is configured.
 type ExactCache struct{ *Memory }
 
-func (e *ExactCache) Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, bool) {
-	return e.Get(ctx, Key(req))
+func (e *ExactCache) Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, CacheHit, bool) {
+	resp, ok := e.Get(ctx, Key(req))
+	if !ok {
+		return nil, CacheHitNone, false
+	}
+	return resp, CacheHitExact, true
 }
 
 func (e *ExactCache) Store(ctx context.Context, req *schema.RequestEnvelope, resp *schema.ResponseEnvelope, ttl time.Duration) {
@@ -61,14 +85,14 @@ func NewSemanticCache(exact *ExactCache, backend SemanticBackend, embedder Embed
 	}
 }
 
-func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, bool) {
-	if resp, ok := s.exact.Lookup(ctx, req); ok {
-		return resp, true
+func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, CacheHit, bool) {
+	if resp, hit, ok := s.exact.Lookup(ctx, req); ok {
+		return resp, hit, true
 	}
 
 	text := requestText(req)
 	if text == "" {
-		return nil, false
+		return nil, CacheHitNone, false
 	}
 
 	// Hard cap so a slow or remote embedder never adds latency to the request path.
@@ -79,10 +103,14 @@ func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope)
 	vec, err := s.embedder.Embed(embedCtx, text)
 	if err != nil {
 		slog.Debug("semantic cache embed failed on lookup", "err", err)
-		return nil, false
+		return nil, CacheHitNone, false
 	}
 
-	return s.backend.Find(ctx, vec, s.threshold)
+	resp, ok := s.backend.Find(ctx, vec, s.threshold)
+	if !ok {
+		return nil, CacheHitNone, false
+	}
+	return resp, CacheHitSemantic, true
 }
 
 func (s *SemanticCache) Store(ctx context.Context, req *schema.RequestEnvelope, resp *schema.ResponseEnvelope, ttl time.Duration) {

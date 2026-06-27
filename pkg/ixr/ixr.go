@@ -133,9 +133,10 @@ func Start(opts ...Option) error {
 
 	var responseCache cache.RequestAwareCache = exactCache
 	if os.Getenv("IXR_SEMANTIC_CACHE") == "true" {
+		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
 		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
 		defer semanticBackend.Close()
-		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, 0.92)
+		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
 	}
 
 	// --- Chat handler ---
@@ -225,6 +226,15 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def

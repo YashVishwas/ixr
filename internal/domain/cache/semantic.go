@@ -179,27 +179,65 @@ func (b *PersistentSemanticBackend) replayJournal(path string) {
 	defer f.Close()
 
 	now := time.Now()
-	var loaded int
+	var total, loaded int
+	var live []journalEntry
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20) // 4 MB max per line
 	for scanner.Scan() {
+		total++
 		var e journalEntry
 		if json.Unmarshal(scanner.Bytes(), &e) != nil {
 			continue
 		}
 		if !e.ExpiresAt.IsZero() && now.After(e.ExpiresAt) {
-			continue
+			continue // expired — compaction will remove it
 		}
 		var ttl time.Duration
 		if !e.ExpiresAt.IsZero() {
 			ttl = time.Until(e.ExpiresAt)
 		}
 		b.MemorySemanticBackend.Store(context.Background(), e.Vec, e.Resp, ttl)
+		live = append(live, e)
 		loaded++
 	}
 	if loaded > 0 {
 		slog.Info("semantic cache: replayed journal", "entries", loaded, "path", path)
 	}
+	// Compact if any entries were pruned — rewrites the file without expired lines.
+	if loaded < total && len(live) > 0 {
+		b.compactJournal(path, live)
+	}
+}
+
+// compactJournal rewrites path with only live entries.
+// Writes to a temp file first and renames atomically — a crash mid-write leaves the original intact.
+func (b *PersistentSemanticBackend) compactJournal(path string, entries []journalEntry) {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return
+	}
+	w := bufio.NewWriter(f)
+	for _, e := range entries {
+		line, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		_, _ = w.Write(line)
+		_ = w.WriteByte('\n')
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return
+	}
+	f.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return
+	}
+	slog.Info("semantic cache: compacted journal", "kept", len(entries), "path", path)
 }
 
 // Store writes to memory and appends to the journal file.
