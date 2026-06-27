@@ -47,6 +47,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
+	"github.com/YashVishwas/ixr/internal/domain/session"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/internal/observability"
 	"github.com/YashVishwas/ixr/pkg/provider"
@@ -169,10 +170,27 @@ func Start(opts ...Option) error {
 		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
 	}
 
-	// Chat completions: auth → rate limit → cache → chat
-	chatChain := authMW.Handler(rateMW.Handler(
-		ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler),
-	))
+	// --- Session store (optional) ---
+	cacheLayer := ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler)
+	var middleChain http.Handler = cacheLayer
+	if sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0); sessionTTLSec > 0 {
+		sessionTTL := time.Duration(sessionTTLSec) * time.Second
+		maxTurns := envInt("IXR_SESSION_MAX_TURNS", 50)
+		var store session.SessionStore
+		if dir := os.Getenv("IXR_SESSION_DIR"); dir != "" {
+			ps := session.NewPersistentSessionStore(sessionTTL, maxTurns, dir)
+			defer ps.Close()
+			store = ps
+		} else {
+			mem := session.NewMemorySessionStore(sessionTTL, maxTurns)
+			defer mem.Close()
+			store = mem
+		}
+		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
+	}
+
+	// Chat completions: auth → rate limit → session → cache → chat
+	chatChain := authMW.Handler(rateMW.Handler(middleChain))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
