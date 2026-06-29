@@ -10,9 +10,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/session"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
+
+// contextHeadroom is the fraction of the context window reserved for the
+// system prompt, new user message, and the model's response.
+// History is trimmed to fit within the remaining 80%.
+const contextHeadroom = 0.80
 
 const (
 	headerSessionID    = "X-IXR-Session-ID"
@@ -64,8 +70,9 @@ func (m *SessionMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Load stored history and prepend to the incoming messages.
+	// 5. Load stored history, trim to fit the model's context window, then prepend.
 	history, _ := m.store.Get(r.Context(), storeKey)
+	history = trimToContextWindow(history, req.Messages, req.Model)
 	historyLen := len(history)
 	if historyLen > 0 {
 		req.Messages = append(history, req.Messages...)
@@ -118,4 +125,51 @@ func lastUserMessage(messages []schema.Message, historyLen int) schema.Message {
 		}
 	}
 	return schema.Message{Role: "user"}
+}
+
+// trimToContextWindow drops the oldest history pairs (user+assistant) until the
+// combined token estimate of history + incoming messages fits within the model's
+// context window budget. Returns the trimmed history slice.
+func trimToContextWindow(history []schema.Message, incoming []schema.Message, model string) []schema.Message {
+	if len(history) == 0 {
+		return history
+	}
+	window := routing.ContextWindowFor(model)
+	budget := int(float64(window) * contextHeadroom)
+
+	// Count tokens already consumed by the incoming messages.
+	incomingTokens := estimateTokens(incoming)
+	available := budget - incomingTokens
+	if available <= 0 {
+		// Incoming messages alone fill the budget — drop all history.
+		slog.Debug("session: context window full, dropping all history",
+			"model", model, "window", window, "incoming_tokens", incomingTokens)
+		return nil
+	}
+
+	// Walk history from the end (most recent) and keep turns that fit.
+	// History is stored as pairs: [user, assistant, user, assistant, ...].
+	// We drop from the front (oldest) so the most recent context is preserved.
+	for estimateTokens(history) > available {
+		if len(history) < 2 {
+			return nil
+		}
+		// Drop the oldest pair.
+		dropped := history[:2]
+		history = history[2:]
+		slog.Debug("session: trimmed oldest turn to fit context window",
+			"model", model, "dropped_tokens", estimateTokens(dropped))
+	}
+	return history
+}
+
+// estimateTokens approximates the token count for a slice of messages.
+// Uses the standard rule of thumb: 1 token ≈ 4 characters.
+// Adds 4 tokens per message for role/formatting overhead.
+func estimateTokens(messages []schema.Message) int {
+	total := 0
+	for _, m := range messages {
+		total += len(m.Content)/4 + 4
+	}
+	return total
 }
