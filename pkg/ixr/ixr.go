@@ -171,18 +171,31 @@ func Start(opts ...Option) error {
 	}
 
 	// --- Session store (optional) ---
+	// Config file takes precedence; env vars are the fallback.
+	sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0)
+	sessionMaxTurns := envInt("IXR_SESSION_MAX_TURNS", 50)
+	sessionDir := os.Getenv("IXR_SESSION_DIR")
+	if fileCfg != nil && fileCfg.Session.TTLSec > 0 {
+		sessionTTLSec = fileCfg.Session.TTLSec
+		if fileCfg.Session.MaxTurns > 0 {
+			sessionMaxTurns = fileCfg.Session.MaxTurns
+		}
+		if fileCfg.Session.Dir != "" {
+			sessionDir = fileCfg.Session.Dir
+		}
+	}
+
 	cacheLayer := ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler)
 	var middleChain http.Handler = cacheLayer
-	if sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0); sessionTTLSec > 0 {
+	if sessionTTLSec > 0 {
 		sessionTTL := time.Duration(sessionTTLSec) * time.Second
-		maxTurns := envInt("IXR_SESSION_MAX_TURNS", 50)
 		var store session.SessionStore
-		if dir := os.Getenv("IXR_SESSION_DIR"); dir != "" {
-			ps := session.NewPersistentSessionStore(sessionTTL, maxTurns, dir)
+		if sessionDir != "" {
+			ps := session.NewPersistentSessionStore(sessionTTL, sessionMaxTurns, sessionDir)
 			defer ps.Close()
 			store = ps
 		} else {
-			mem := session.NewMemorySessionStore(sessionTTL, maxTurns)
+			mem := session.NewMemorySessionStore(sessionTTL, sessionMaxTurns)
 			defer mem.Close()
 			store = mem
 		}
