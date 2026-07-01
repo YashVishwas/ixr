@@ -41,13 +41,15 @@ type ExecuteResult struct {
 
 // Execute calls the primary model with retry/backoff, then tries the fallback chain.
 // 4xx errors skip retries and move immediately to the next fallback.
+// Context-length errors escalate to the cheapest fallback with a larger context window.
 // Context cancellation aborts immediately.
 func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestEnvelope, lookup ProviderLookup, cfg RetryConfig) (ExecuteResult, error) {
 	ordered := orderedCandidates(decision)
 	var lastErr error
 	totalAttempts := 0
 
-	for idx, candidate := range ordered {
+	for i := 0; i < len(ordered); i++ {
+		candidate := ordered[i]
 		p, err := lookup(candidate.Model)
 		if err != nil {
 			lastErr = err
@@ -62,7 +64,7 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 				Response:     resp,
 				Provider:     p,
 				Model:        candidate.Model,
-				FallbackUsed: idx > 0,
+				FallbackUsed: i > 0,
 				FallbackFrom: decision.Model,
 				Attempts:     totalAttempts,
 			}, nil
@@ -71,6 +73,15 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return ExecuteResult{Attempts: totalAttempts}, err
+		}
+
+		// Context-length overflow: rebuild the remaining candidates keeping only
+		// those with a larger context window, sorted cheapest-first so we
+		// escalate to the minimum viable model automatically.
+		if IsContextLengthError(err) {
+			currentWindow := ContextWindowFor(candidate.Model)
+			ordered = escalateCandidates(ordered[i+1:], currentWindow)
+			i = -1 // reset; i++ will make it 0
 		}
 	}
 
@@ -84,7 +95,8 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 	var lastErr error
 	totalAttempts := 0
 
-	for idx, candidate := range ordered {
+	for i := 0; i < len(ordered); i++ {
+		candidate := ordered[i]
 		p, err := lookup(candidate.Model)
 		if err != nil {
 			lastErr = err
@@ -99,7 +111,7 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 			return ExecuteResult{
 				Provider:     p,
 				Model:        candidate.Model,
-				FallbackUsed: idx > 0,
+				FallbackUsed: i > 0,
 				FallbackFrom: decision.Model,
 				Attempts:     totalAttempts,
 			}, nil
@@ -108,6 +120,12 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return ExecuteResult{Attempts: totalAttempts}, err
+		}
+
+		if IsContextLengthError(err) {
+			currentWindow := ContextWindowFor(candidate.Model)
+			ordered = escalateCandidates(ordered[i+1:], currentWindow)
+			i = -1
 		}
 	}
 
@@ -189,4 +207,24 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// escalateCandidates filters remaining candidates to those whose context window
+// exceeds minWindow, then sorts them by ascending context window size so the
+// smallest viable model (cheapest escalation) is tried first.
+func escalateCandidates(remaining []Candidate, minWindow int) []Candidate {
+	var eligible []Candidate
+	for _, c := range remaining {
+		if ContextWindowFor(c.Model) > minWindow {
+			eligible = append(eligible, c)
+		}
+	}
+	// Sort by ascending context window — smallest sufficient window wins.
+	// This avoids jumping straight to a 1M-token model when a 200k model suffices.
+	for i := 1; i < len(eligible); i++ {
+		for j := i; j > 0 && ContextWindowFor(eligible[j].Model) < ContextWindowFor(eligible[j-1].Model); j-- {
+			eligible[j], eligible[j-1] = eligible[j-1], eligible[j]
+		}
+	}
+	return eligible
 }
