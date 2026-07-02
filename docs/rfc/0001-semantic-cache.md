@@ -562,6 +562,14 @@ These are real problems in the ecosystem. ixr will not absorb them.
 
 9. **Streaming session capture.** Streaming responses currently receive history injection but the response is not captured back into the session store (v1 constraint). A v2 SSE assembler that reconstructs the assistant turn from chunks would close this gap without buffering the stream for the client.
 
+10. **Semantic cache false hits when session history is large.** Observed in integration testing (`test/all-features`): when `SessionMiddleware` prepends a rich conversation history to the request before the cache sees it, two semantically different questions in the same session can produce message lists that are similar enough to trigger a `SEMANTIC-HIT` against a prior cached entry. The injected history dominates the token overlap score, drowning out the difference in the new user turn.
+
+    Two mitigations to evaluate before the semantic cache is considered stable in session-enabled deployments:
+    - **Raise `IXR_CACHE_THRESHOLD`** — 0.95+ reduces false hits at the cost of fewer legitimate semantic matches. Simple, operator-configurable today.
+    - **Cache key excludes injected history** — `SemanticCache.Lookup` embeds only the new user turn (`requestText` already extracts `role=user` messages), but `ExactCache` hashes the full `Messages` array including history. Making the semantic layer embed only the net-new user message (the tail beyond `historyLen`) would decouple cache behaviour from session length. Requires `SessionMiddleware` to communicate `historyLen` to the cache layer — a non-trivial interface change.
+
+    The cleaner long-term fix is option 2; option 1 is the safe default until it is implemented.
+
 ---
 
 ## Future Work
