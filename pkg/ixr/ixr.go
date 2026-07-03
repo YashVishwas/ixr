@@ -19,6 +19,7 @@ import (
 	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
+	piiguardrail "github.com/YashVishwas/ixr/plugins/pii-guardrail"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
@@ -43,6 +44,7 @@ import (
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/guardrail"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
@@ -169,9 +171,16 @@ func Start(opts ...Option) error {
 		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
 	}
 
-	// Chat completions: auth → rate limit → cache → chat
+	// --- Interceptor chain (PII guardrail + future pre-call plugins) ---
+	var interceptors guardrail.Chain
+	if mode := os.Getenv("IXR_PII_GUARDRAIL"); mode == "block" || mode == "redact" {
+		interceptors = append(interceptors, piiguardrail.New(piiguardrail.Mode(mode)))
+	}
+
+	// Chat completions: auth → rate limit → interceptors → cache → chat
+	cacheAndChat := ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler)
 	chatChain := authMW.Handler(rateMW.Handler(
-		ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler),
+		ingress.NewInterceptorMiddleware(interceptors, cacheAndChat),
 	))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
