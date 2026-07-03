@@ -47,17 +47,20 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 	}
 
 	rec := schema.TelemetryRecord{
-		RequestID:    ev.ID,
-		UseCaseID:    ev.UseCaseID,
-		TenantID:     ev.TenantID,
-		Model:        ev.Model,
-		Provider:     ev.Provider,
-		LatencyMS:    int(ev.Latency.Milliseconds()),
-		TokensIn:     ev.TokensIn,
-		TokensOut:    ev.TokensOut,
-		Success:      ev.Error == "",
-		FinishReason: finishReason,
-		Timestamp:    ev.Timestamp,
+		RequestID:     ev.ID,
+		UseCaseID:     ev.UseCaseID,
+		TenantID:      ev.TenantID,
+		Model:         ev.Model,
+		ResponseModel: ev.Response.Model,
+		Provider:      ev.Provider,
+		LatencyMS:     int(ev.Latency.Milliseconds()),
+		TokensIn:      ev.TokensIn,
+		TokensOut:     ev.TokensOut,
+		MaxTokens:     ev.Request.MaxTokens,
+		CostUSD:       ev.Cost.TotalUSD,
+		Success:       ev.Error == "",
+		FinishReason:  finishReason,
+		Timestamp:     ev.Timestamp,
 	}
 
 	// Update the performance store with each call's outcome.

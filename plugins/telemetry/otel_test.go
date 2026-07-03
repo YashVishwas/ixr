@@ -10,16 +10,19 @@ import (
 
 func makeRec(provider, model string, tokensIn, tokensOut, latencyMS int, success bool) schema.TelemetryRecord {
 	return schema.TelemetryRecord{
-		RequestID: "req-1",
-		Provider:  provider,
-		Model:     model,
-		TokensIn:  tokensIn,
-		TokensOut: tokensOut,
-		LatencyMS: latencyMS,
-		Success:   success,
-		TenantID:  "acme",
-		UseCaseID: "summarization",
-		Timestamp: time.Now(),
+		RequestID:     "req-1",
+		Provider:      provider,
+		Model:         model,
+		ResponseModel: model + "-20251001", // providers often version the model name
+		TokensIn:      tokensIn,
+		TokensOut:     tokensOut,
+		MaxTokens:     1000,
+		CostUSD:       0.0025,
+		LatencyMS:     latencyMS,
+		Success:       success,
+		TenantID:      "acme",
+		UseCaseID:     "summarization",
+		Timestamp:     time.Now(),
 	}
 }
 
@@ -91,6 +94,56 @@ func TestGenAIAttributes_IxrExtensions(t *testing.T) {
 	}
 	if attrMap["ixr.latency_ms"] != int64(200) {
 		t.Errorf("ixr.latency_ms: got %v", attrMap["ixr.latency_ms"])
+	}
+	if attrMap["ixr.cost_usd"] != 0.0025 {
+		t.Errorf("ixr.cost_usd: got %v", attrMap["ixr.cost_usd"])
+	}
+}
+
+func TestGenAIAttributes_ResponseModel(t *testing.T) {
+	rec := makeRec("anthropic", "claude-haiku-4-5", 10, 20, 100, true)
+	// ResponseModel differs from Model — should appear as gen_ai.response.model
+	attrs := genAIAttributes(rec)
+	attrMap := make(map[string]interface{})
+	for _, a := range attrs {
+		attrMap[string(a.Key)] = a.Value.AsInterface()
+	}
+	if attrMap["gen_ai.response.model"] != "claude-haiku-4-5-20251001" {
+		t.Errorf("gen_ai.response.model: got %v", attrMap["gen_ai.response.model"])
+	}
+}
+
+func TestGenAIAttributes_ResponseModelOmittedWhenSame(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o", 10, 20, 100, true)
+	rec.ResponseModel = rec.Model // same — should not emit the attribute
+	attrs := genAIAttributes(rec)
+	for _, a := range attrs {
+		if string(a.Key) == "gen_ai.response.model" {
+			t.Fatal("gen_ai.response.model should be omitted when same as request model")
+		}
+	}
+}
+
+func TestGenAIAttributes_MaxTokens(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o", 10, 20, 100, true)
+	attrs := genAIAttributes(rec)
+	attrMap := make(map[string]interface{})
+	for _, a := range attrs {
+		attrMap[string(a.Key)] = a.Value.AsInterface()
+	}
+	if attrMap["gen_ai.request.max_tokens"] != int64(1000) {
+		t.Errorf("gen_ai.request.max_tokens: got %v", attrMap["gen_ai.request.max_tokens"])
+	}
+}
+
+func TestGenAIAttributes_MaxTokensOmittedWhenZero(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o", 10, 20, 100, true)
+	rec.MaxTokens = 0
+	attrs := genAIAttributes(rec)
+	for _, a := range attrs {
+		if string(a.Key) == "gen_ai.request.max_tokens" {
+			t.Fatal("gen_ai.request.max_tokens should be omitted when zero")
+		}
 	}
 }
 

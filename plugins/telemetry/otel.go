@@ -68,11 +68,17 @@ func genAIAttributes(rec schema.TelemetryRecord) []attribute.KeyValue {
 		semconv.GenAiUsageCompletionTokensKey.Int(rec.TokensOut),
 	}
 
+	if rec.ResponseModel != "" && rec.ResponseModel != rec.Model {
+		attrs = append(attrs, semconv.GenAiResponseModelKey.String(rec.ResponseModel))
+	}
 	if rec.RequestID != "" {
 		attrs = append(attrs, semconv.GenAiResponseIDKey.String(rec.RequestID))
 	}
 	if rec.FinishReason != "" {
 		attrs = append(attrs, semconv.GenAiResponseFinishReasonsKey.StringSlice([]string{rec.FinishReason}))
+	}
+	if rec.MaxTokens > 0 {
+		attrs = append(attrs, semconv.GenAiRequestMaxTokensKey.Int(rec.MaxTokens))
 	}
 
 	// ixr-specific attributes that go beyond the GenAI conventions.
@@ -83,6 +89,9 @@ func genAIAttributes(rec schema.TelemetryRecord) []attribute.KeyValue {
 		attrs = append(attrs, attribute.String("ixr.use_case_id", rec.UseCaseID))
 	}
 	attrs = append(attrs, attribute.Int("ixr.latency_ms", rec.LatencyMS))
+	if rec.CostUSD > 0 {
+		attrs = append(attrs, attribute.Float64("ixr.cost_usd", rec.CostUSD))
+	}
 
 	return attrs
 }
