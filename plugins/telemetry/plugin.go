@@ -59,6 +59,7 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 		MaxTokens:     ev.Request.MaxTokens,
 		CostUSD:       ev.Cost.TotalUSD,
 		Success:       ev.Error == "",
+		ErrorMessage:  ev.Error,
 		FinishReason:  finishReason,
 		Timestamp:     ev.Timestamp,
 	}

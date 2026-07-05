@@ -172,11 +172,40 @@ func TestOTELSink_WriteNoOp(t *testing.T) {
 }
 
 func TestOTELSink_WriteError(t *testing.T) {
-	// Failed call should not error — error is set on the span, not returned.
+	// Failed call should not return error — error details go onto the span.
 	sink := NewOTELSink()
 	rec := makeRec("openai", "gpt-4o", 50, 0, 100, false)
+	rec.ErrorMessage = "openai: status 500: internal server error"
 	if err := sink.Write(context.Background(), rec); err != nil {
 		t.Fatalf("OTELSink.Write should not return error even on failed calls: %v", err)
+	}
+}
+
+func TestGenAIAttributes_FallbackUsed(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o-mini", 10, 20, 300, true)
+	rec.FallbackUsed = true
+	rec.FallbackFrom = "gpt-4o"
+	attrs := genAIAttributes(rec)
+	attrMap := make(map[string]interface{})
+	for _, a := range attrs {
+		attrMap[string(a.Key)] = a.Value.AsInterface()
+	}
+	if attrMap["ixr.fallback_used"] != true {
+		t.Errorf("ixr.fallback_used: got %v", attrMap["ixr.fallback_used"])
+	}
+	if attrMap["ixr.fallback_from"] != "gpt-4o" {
+		t.Errorf("ixr.fallback_from: got %v", attrMap["ixr.fallback_from"])
+	}
+}
+
+func TestGenAIAttributes_FallbackNotUsed(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o", 10, 20, 300, true)
+	rec.FallbackUsed = false
+	attrs := genAIAttributes(rec)
+	for _, a := range attrs {
+		if string(a.Key) == "ixr.fallback_used" {
+			t.Fatal("ixr.fallback_used should be omitted when false")
+		}
 	}
 }
 

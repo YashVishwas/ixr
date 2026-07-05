@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -51,6 +52,9 @@ func (s *OTELSink) Write(ctx context.Context, rec schema.TelemetryRecord) error 
 
 	if !rec.Success {
 		span.SetStatus(codes.Error, "provider returned an error")
+		if rec.ErrorMessage != "" {
+			span.RecordError(errors.New(rec.ErrorMessage))
+		}
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
@@ -91,6 +95,12 @@ func genAIAttributes(rec schema.TelemetryRecord) []attribute.KeyValue {
 	attrs = append(attrs, attribute.Int("ixr.latency_ms", rec.LatencyMS))
 	if rec.CostUSD > 0 {
 		attrs = append(attrs, attribute.Float64("ixr.cost_usd", rec.CostUSD))
+	}
+	if rec.FallbackUsed {
+		attrs = append(attrs, attribute.Bool("ixr.fallback_used", true))
+		if rec.FallbackFrom != "" {
+			attrs = append(attrs, attribute.String("ixr.fallback_from", rec.FallbackFrom))
+		}
 	}
 
 	return attrs
