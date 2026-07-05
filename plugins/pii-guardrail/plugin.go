@@ -55,7 +55,7 @@ var builtinCategories = []category{
 	},
 	{
 		name: "credit_card",
-		// 13-19 digit sequences with optional spaces/dashes (LUHN not validated — too expensive)
+		// 13-19 digit sequences with optional spaces/dashes; LUHN-validated before blocking.
 		pattern: regexp.MustCompile(`\b(?:\d[ \-]?){13,19}\b`),
 	},
 	{
@@ -92,7 +92,7 @@ func (p *Plugin) Intercept(_ context.Context, req *schema.RequestEnvelope) error
 			continue
 		}
 		for _, cat := range p.categories {
-			if !cat.pattern.MatchString(msg.Content) {
+			if !p.matches(cat, msg.Content) {
 				continue
 			}
 			switch p.mode {
@@ -104,11 +104,67 @@ func (p *Plugin) Intercept(_ context.Context, req *schema.RequestEnvelope) error
 				}
 			case ModeRedact:
 				placeholder := "[REDACTED:" + strings.ToUpper(cat.name) + "]"
-				req.Messages[i].Content = cat.pattern.ReplaceAllString(msg.Content, placeholder)
-				// Re-read from req in case prior categories already redacted this message.
+				req.Messages[i].Content = p.redact(cat, msg.Content, placeholder)
 				msg = req.Messages[i]
 			}
 		}
 	}
 	return nil
+}
+
+// matches reports whether content contains PII in the given category.
+// For credit cards, each regex match is additionally validated with LUHN
+// to eliminate false positives on ISBNs, serial numbers, and product codes.
+func (p *Plugin) matches(cat category, content string) bool {
+	if cat.name != "credit_card" {
+		return cat.pattern.MatchString(content)
+	}
+	for _, m := range cat.pattern.FindAllString(content, -1) {
+		if luhn(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// redact replaces all PII matches in content with placeholder.
+// Credit card matches are LUHN-validated before replacement.
+func (p *Plugin) redact(cat category, content, placeholder string) string {
+	if cat.name != "credit_card" {
+		return cat.pattern.ReplaceAllString(content, placeholder)
+	}
+	return cat.pattern.ReplaceAllStringFunc(content, func(m string) string {
+		if luhn(m) {
+			return placeholder
+		}
+		return m
+	})
+}
+
+// luhn validates a numeric string using the Luhn algorithm.
+// Spaces and dashes are stripped before validation.
+func luhn(s string) bool {
+	s = strings.NewReplacer(" ", "", "-", "").Replace(s)
+	if len(s) < 10 {
+		return false
+	}
+	var sum int
+	// Walk right to left; every second digit from the right (starting at position 2)
+	// is doubled. Position 1 (rightmost) is never doubled.
+	for i, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+		digit := int(ch - '0')
+		// Position from the right: (len-1-i). Double when that position is even (2, 4, 6...).
+		posFromRight := len(s) - 1 - i
+		if posFromRight%2 == 1 {
+			digit *= 2
+			if digit > 9 {
+				digit -= 9
+			}
+		}
+		sum += digit
+	}
+	return sum%10 == 0
 }

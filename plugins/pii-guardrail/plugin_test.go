@@ -55,11 +55,49 @@ func TestBlock_SSN(t *testing.T) {
 	}
 }
 
-func TestBlock_CreditCard(t *testing.T) {
+func TestBlock_CreditCard_ValidLUHN(t *testing.T) {
 	p := New(ModeBlock)
+	// 4111111111111111 is the canonical Visa test number — passes LUHN.
 	err := p.Intercept(context.Background(), makeReq("Card number: 4111 1111 1111 1111"))
 	if err == nil {
-		t.Fatal("expected block on credit card")
+		t.Fatal("expected block on valid credit card number")
+	}
+}
+
+func TestBlock_CreditCard_InvalidLUHN(t *testing.T) {
+	p := New(ModeBlock)
+	// 4111111111111112 fails LUHN — use a prompt with no other PII patterns.
+	err := p.Intercept(context.Background(), makeReq("The product serial is PROD4111111111111112END"))
+	if err != nil {
+		t.Fatalf("invalid LUHN should not block, got: %v", err)
+	}
+}
+
+func TestBlock_CreditCard_ISBN(t *testing.T) {
+	p := New(ModeBlock)
+	// 9780306406157 is a real ISBN-13 — fails LUHN, should pass through.
+	err := p.Intercept(context.Background(), makeReq("See book ISBN9780306406157 for reference"))
+	if err != nil {
+		t.Fatalf("ISBN should not be blocked (fails LUHN): %v", err)
+	}
+}
+
+func TestLUHN_KnownValues(t *testing.T) {
+	cases := []struct {
+		number string
+		valid  bool
+	}{
+		{"4111111111111111", true},  // Visa test
+		{"5500005555555559", true},  // Mastercard test
+		{"4111111111111112", false}, // off by one
+		{"1234567890123456", false}, // random digits
+		{"79927398713", true},       // LUHN spec example
+		{"79927398714", false},      // LUHN spec invalid
+	}
+	for _, tc := range cases {
+		if got := luhn(tc.number); got != tc.valid {
+			t.Errorf("luhn(%q) = %v, want %v", tc.number, got, tc.valid)
+		}
 	}
 }
 

@@ -180,7 +180,7 @@ func Start(opts ...Option) error {
 	// Chat completions: auth → rate limit → interceptors → cache → chat
 	cacheAndChat := ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler)
 	chatChain := authMW.Handler(rateMW.Handler(
-		ingress.NewInterceptorMiddleware(interceptors, cacheAndChat),
+		ingress.NewInterceptorMiddleware(interceptors, cacheAndChat).WithBus(memBus),
 	))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
