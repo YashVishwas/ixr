@@ -11,6 +11,7 @@ import (
 
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/reasoning"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/pkg/bus"
@@ -116,7 +117,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	resp, err := p.Chat(r.Context(), &req)
+	resp, err := p.Chat(r.Context(), reasoning.AdjustTokenBudget(&req))
 	latency := time.Since(start)
 
 	if h.bus != nil {
@@ -175,7 +176,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	var totalIn, totalOut int
 	start := time.Now()
 
-	streamErr := p.Stream(r.Context(), req, func(chunk provider.StreamChunk) error {
+	streamErr := p.Stream(r.Context(), reasoning.AdjustTokenBudget(req), func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
