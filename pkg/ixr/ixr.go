@@ -47,6 +47,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
+	"github.com/YashVishwas/ixr/internal/domain/session"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/internal/observability"
 	"github.com/YashVishwas/ixr/pkg/provider"
@@ -169,10 +170,40 @@ func Start(opts ...Option) error {
 		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
 	}
 
-	// Chat completions: auth → rate limit → cache → chat
-	chatChain := authMW.Handler(rateMW.Handler(
-		ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler),
-	))
+	// --- Session store (optional) ---
+	// Config file takes precedence; env vars are the fallback.
+	sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0)
+	sessionMaxTurns := envInt("IXR_SESSION_MAX_TURNS", 50)
+	sessionDir := os.Getenv("IXR_SESSION_DIR")
+	if fileCfg != nil && fileCfg.Session.TTLSec > 0 {
+		sessionTTLSec = fileCfg.Session.TTLSec
+		if fileCfg.Session.MaxTurns > 0 {
+			sessionMaxTurns = fileCfg.Session.MaxTurns
+		}
+		if fileCfg.Session.Dir != "" {
+			sessionDir = fileCfg.Session.Dir
+		}
+	}
+
+	cacheLayer := ingress.NewCacheMiddleware(responseCache, cacheTTL, chatHandler)
+	var middleChain http.Handler = cacheLayer
+	if sessionTTLSec > 0 {
+		sessionTTL := time.Duration(sessionTTLSec) * time.Second
+		var store session.SessionStore
+		if sessionDir != "" {
+			ps := session.NewPersistentSessionStore(sessionTTL, sessionMaxTurns, sessionDir)
+			defer ps.Close()
+			store = ps
+		} else {
+			mem := session.NewMemorySessionStore(sessionTTL, sessionMaxTurns)
+			defer mem.Close()
+			store = mem
+		}
+		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
+	}
+
+	// Chat completions: auth → rate limit → session → cache → chat
+	chatChain := authMW.Handler(rateMW.Handler(middleChain))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
