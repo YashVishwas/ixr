@@ -10,6 +10,19 @@ type Config struct {
 	RateLimit RateLimitConfig           `yaml:"rate_limit"`
 	LogLevel  string                    `yaml:"log_level"`
 	Secrets   SecretsConfig             `yaml:"secrets"`
+	Session   SessionConfig             `yaml:"session"`
+}
+
+// SessionConfig controls cross-request conversation history.
+type SessionConfig struct {
+	// TTLSec is the session inactivity timeout in seconds. 0 disables sessions.
+	TTLSec int `yaml:"ttl_sec"`
+	// MaxTurns is the maximum number of user+assistant pairs stored per session.
+	// Oldest pairs are dropped when the limit is reached. Default: 50.
+	MaxTurns int `yaml:"max_turns"`
+	// Dir is the directory for the persistent session journal (sessions.jsonl).
+	// Leave empty for in-memory-only operation (sessions lost on restart).
+	Dir string `yaml:"dir"`
 }
 
 // ServerConfig holds HTTP server settings.

@@ -1,0 +1,63 @@
+server:
+  port: 8085
+
+log_level: warn
+
+auth:
+  disable_auth: true
+
+session:
+  ttl_sec: 3600    # sessions last 1 hour of inactivity
+  max_turns: 50    # keep last 50 user+assistant pairs
+  # dir: /tmp/ixr-sessions  # uncomment to persist sessions across restarts
+
+providers:
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+  anthropic:
+    api_key: "${ANTHROPIC_API_KEY}"
+  gemini:
+    api_key: "${GOOGLE_API_KEY}"
+  gemma:
+    api_key: "${GOOGLE_API_KEY}"
+  llama:
+    api_key: "${GROQ_API_KEY}"
+  deepseek:
+    api_key: "${DEEPSEEK_API_KEY}"
+  cerebras:
+    api_key: "${CEREBRAS_API_KEY}"
+  mistral:
+    api_key: "${MISTRAL_API_KEY}"
+  openrouter:
+    api_key: "${OPENROUTER_API_KEY}"
+  sambanova:
+    api_key: "${SAMBANOVA_API_KEY}"
+  github:
+    api_key: "${GITHUB_TOKEN}"
+  zhipu:
+    api_key: "${ZHIPU_API_KEY}"
+
+chains:
+  fast-refine:
+    models:
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
+    prompts:
+      - ""
+      - "Improve the previous answer: fix any inaccuracies and make it more concise."
+  smart-qa:
+    models:
+      - llama-3.3-70b-versatile
+      - gpt-oss-120b
+    prompts:
+      - ""
+      - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
+  debate:
+    models:
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
+      - gpt-oss-120b
+    prompts:
+      - ""
+      - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
+      - "Synthesize the two perspectives above into the best possible answer."

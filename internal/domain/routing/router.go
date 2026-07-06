@@ -58,6 +58,10 @@ type ModelCard struct {
 	Coding       float64
 	Math         float64
 	Multilingual float64
+
+	// ContextWindow is the model's maximum context length in tokens.
+	// Used by SessionMiddleware to trim history before it overflows.
+	ContextWindow int
 }
 
 var catalog = []ModelCard{
@@ -74,6 +78,8 @@ var catalog = []ModelCard{
 		Coding:       0.90,
 		Math:         0.99,
 		Multilingual: 0.88,
+
+		ContextWindow: 200_000,
 	},
 	{
 		ID: "gpt-5.2",
@@ -88,6 +94,8 @@ var catalog = []ModelCard{
 		Coding:       0.93,
 		Math:         0.95,
 		Multilingual: 0.86,
+
+		ContextWindow: 128_000,
 	},
 	{
 		ID: "gpt-5.3-codex",
@@ -102,6 +110,8 @@ var catalog = []ModelCard{
 		Coding:       0.98,
 		Math:         0.88,
 		Multilingual: 0.78,
+
+		ContextWindow: 128_000,
 	},
 	{
 		ID: "gemini-3.1-pro",
@@ -116,6 +126,8 @@ var catalog = []ModelCard{
 		Coding:       0.88,
 		Math:         1.00,
 		Multilingual: 0.94,
+
+		ContextWindow: 1_000_000,
 	},
 	{
 		ID: "deepseek-v3-0324",
@@ -130,6 +142,8 @@ var catalog = []ModelCard{
 		Coding:       0.78,
 		Math:         0.88,
 		Multilingual: 0.76,
+
+		ContextWindow: 128_000,
 	},
 	{
 		ID: "llama-4-scout",
@@ -144,6 +158,8 @@ var catalog = []ModelCard{
 		Coding:       0.70,
 		Math:         0.78,
 		Multilingual: 0.74,
+
+		ContextWindow: 10_000_000,
 	},
 	{
 		ID: "gemma-3-27b",
@@ -158,7 +174,61 @@ var catalog = []ModelCard{
 		Coding:       0.62,
 		Math:         0.70,
 		Multilingual: 0.72,
+
+		ContextWindow: 128_000,
 	},
+}
+
+// knownContextWindows covers widely-used models not in the routing catalog.
+// Used by ContextWindowFor as a secondary lookup before falling back to the default.
+var knownContextWindows = map[string]int{
+	// OpenAI
+	"gpt-4o":                128_000,
+	"gpt-4o-mini":           128_000,
+	"gpt-4-turbo":           128_000,
+	"gpt-4":                 8_192,
+	"gpt-3.5-turbo":         16_385,
+	"o1":                    200_000,
+	"o1-mini":               128_000,
+	"o3":                    200_000,
+	"o3-mini":               200_000,
+	// Anthropic
+	"claude-3-5-sonnet-20241022": 200_000,
+	"claude-3-5-haiku-20241022":  200_000,
+	"claude-3-opus-20240229":     200_000,
+	"claude-opus-4-5":            200_000,
+	"claude-sonnet-4-5":          200_000,
+	"claude-haiku-4-5":           200_000,
+	// Google
+	"gemini-1.5-pro":   1_000_000,
+	"gemini-1.5-flash": 1_000_000,
+	"gemini-2.0-flash": 1_000_000,
+	// Meta / Llama
+	"llama-4-maverick": 1_000_000,
+	// Mistral
+	"mistral-large-latest": 128_000,
+	"mistral-small-latest": 128_000,
+	// DeepSeek
+	"deepseek-chat":  64_000,
+	"deepseek-coder": 128_000,
+}
+
+// defaultContextWindow is used when a model is not in the catalog or knownContextWindows.
+// 128k is the most common context window for modern frontier models.
+const defaultContextWindow = 128_000
+
+// ContextWindowFor returns the context window size in tokens for the given model ID.
+// Checks the routing catalog first, then knownContextWindows, then returns the default.
+func ContextWindowFor(model string) int {
+	for _, card := range catalog {
+		if card.ID == model {
+			return card.ContextWindow
+		}
+	}
+	if w, ok := knownContextWindows[model]; ok {
+		return w
+	}
+	return defaultContextWindow
 }
 
 func clamp01(x float64) float64 {
