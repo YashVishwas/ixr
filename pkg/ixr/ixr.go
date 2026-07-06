@@ -121,7 +121,17 @@ func Start(opts ...Option) error {
 	memBus := bus.NewMemory(0)
 	mgr := pluginmgr.New(memBus)
 	mgr.Register(&auditlog.Plugin{})
-	mgr.Register(telemetry.New(perfStore, telemetry.NewJSONLinesSink(os.Stderr)))
+
+	// Telemetry: always write JSON lines to stderr; add OTEL span sink when
+	// IXR_OTLP_ENDPOINT is set so spans flow to any OTLP-compatible backend.
+	var telemetrySink telemetry.Sink = telemetry.NewJSONLinesSink(os.Stderr)
+	if otlpEndpoint != "" {
+		telemetrySink = telemetry.MultiSink{
+			telemetry.NewJSONLinesSink(os.Stderr),
+			telemetry.NewOTELSink(),
+		}
+	}
+	mgr.Register(telemetry.New(perfStore, telemetrySink))
 
 	// --- Adaptive routing ---
 	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
