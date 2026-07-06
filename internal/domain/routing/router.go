@@ -66,8 +66,7 @@ type ModelCard struct {
 
 var catalog = []ModelCard{
 	{
-		ID: "claude-opus-4.7",
-
+		ID:             "claude-opus-4.7",
 		InputUSDPer1M:  5,
 		OutputUSDPer1M: 25,
 
@@ -82,8 +81,7 @@ var catalog = []ModelCard{
 		ContextWindow: 200_000,
 	},
 	{
-		ID: "gpt-5.2",
-
+		ID:             "gpt-5.2",
 		InputUSDPer1M:  1.5,
 		OutputUSDPer1M: 14,
 
@@ -98,8 +96,7 @@ var catalog = []ModelCard{
 		ContextWindow: 128_000,
 	},
 	{
-		ID: "gpt-5.3-codex",
-
+		ID:             "gpt-5.3-codex",
 		InputUSDPer1M:  1.75,
 		OutputUSDPer1M: 14,
 
@@ -114,8 +111,7 @@ var catalog = []ModelCard{
 		ContextWindow: 128_000,
 	},
 	{
-		ID: "gemini-3.1-pro",
-
+		ID:             "gemini-3.1-pro",
 		InputUSDPer1M:  2,
 		OutputUSDPer1M: 12,
 
@@ -130,8 +126,7 @@ var catalog = []ModelCard{
 		ContextWindow: 1_000_000,
 	},
 	{
-		ID: "deepseek-v3-0324",
-
+		ID:             "deepseek-v3-0324",
 		InputUSDPer1M:  0.27,
 		OutputUSDPer1M: 1.10,
 
@@ -146,8 +141,7 @@ var catalog = []ModelCard{
 		ContextWindow: 128_000,
 	},
 	{
-		ID: "llama-4-scout",
-
+		ID:             "llama-4-scout",
 		InputUSDPer1M:  0.11,
 		OutputUSDPer1M: 0.34,
 
@@ -162,13 +156,47 @@ var catalog = []ModelCard{
 		ContextWindow: 10_000_000,
 	},
 	{
-		ID: "gemma-3-27b",
-
+		ID:             "gemma-3-27b",
 		InputUSDPer1M:  0.07,
 		OutputUSDPer1M: 0.07,
+		LatencySec:     0.72,
+		FailureRate:    0.045,
+		Reasoning:      0.68,
+		Coding:         0.62,
+		Math:           0.70,
+		Multilingual:   0.72,
+		ContextWindow:  128_000,
+	},
+}
 
-		LatencySec:  0.72,
-		FailureRate: 0.045,
+// knownContextWindows covers widely-used models not in the routing catalog.
+var knownContextWindows = map[string]int{
+	"gpt-4o":                     128_000,
+	"gpt-4o-mini":                128_000,
+	"gpt-4-turbo":                128_000,
+	"gpt-4":                      8_192,
+	"gpt-3.5-turbo":              16_385,
+	"o1":                         200_000,
+	"o1-mini":                    128_000,
+	"o3":                         200_000,
+	"o3-mini":                    200_000,
+	"claude-3-5-sonnet-20241022": 200_000,
+	"claude-3-5-haiku-20241022":  200_000,
+	"claude-3-opus-20240229":     200_000,
+	"claude-opus-4-5":            200_000,
+	"claude-sonnet-4-5":          200_000,
+	"claude-haiku-4-5":           200_000,
+	"gemini-1.5-pro":             1_000_000,
+	"gemini-1.5-flash":           1_000_000,
+	"gemini-2.0-flash":           1_000_000,
+	"llama-4-maverick":           1_000_000,
+	"mistral-large-latest":       128_000,
+	"mistral-small-latest":       128_000,
+	"deepseek-chat":              64_000,
+	"deepseek-coder":             128_000,
+}
+
+const defaultContextWindow = 128_000
 
 		Reasoning:    0.68,
 		Coding:       0.62,
