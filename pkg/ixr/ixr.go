@@ -19,6 +19,7 @@ import (
 	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
+	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
@@ -43,6 +44,7 @@ import (
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	pkgguardrail "github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
@@ -180,6 +182,26 @@ func Start(opts ...Option) error {
 		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
 	}
 
+	// --- Budget enforcement (optional) ---
+	var interceptors pkgguardrail.Chain
+	budgetLimits := make(map[string]budgetplugin.Limit)
+	if fileCfg != nil {
+		for tenantID, tc := range fileCfg.Tenants {
+			if tc.Quotas.MonthlyUSDCap > 0 {
+				budgetLimits[tenantID] = budgetplugin.Limit{
+					LimitUSD: tc.Quotas.MonthlyUSDCap,
+					WarnAt:   0.8,
+				}
+			}
+		}
+	}
+	budgetPlugin := budgetplugin.New(budgetLimits, nil, memBus, os.Getenv("IXR_BUDGET_DIR"))
+	defer budgetPlugin.Close()
+	mgr.Register(budgetPlugin) // accumulates spend post-call
+	if len(budgetLimits) > 0 {
+		interceptors = append(interceptors, budgetPlugin) // gates pre-call
+	}
+
 	// --- Session store (optional) ---
 	// Config file takes precedence; env vars are the fallback.
 	sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0)
@@ -212,8 +234,10 @@ func Start(opts ...Option) error {
 		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
 	}
 
-	// Chat completions: auth → rate limit → session → cache → chat
-	chatChain := authMW.Handler(rateMW.Handler(middleChain))
+	// Chat completions: auth → rate limit → interceptors → session → cache → chat
+	chatChain := authMW.Handler(rateMW.Handler(
+		ingress.NewInterceptorMiddleware(interceptors, middleChain).WithBus(memBus),
+	))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
