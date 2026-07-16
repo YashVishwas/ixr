@@ -21,6 +21,7 @@ func New() *Resolver { return &Resolver{} }
 func (r *Resolver) Resolve(req *http.Request) schema.Identity {
 	return schema.Identity{
 		TenantID:  firstNonEmpty(req.Header.Get("X-IXR-TenantID"), "default"),
+		TeamID:    req.Header.Get("X-IXR-TeamID"),
 		UserID:    req.Header.Get("X-IXR-UserID"),
 		UseCaseID: req.Header.Get("X-IXR-UseCase"),
 	}

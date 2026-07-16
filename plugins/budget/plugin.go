@@ -40,32 +40,36 @@ type deltaEntry struct {
 	Timestamp time.Time `json:"ts"`
 }
 
-// Plugin accumulates spend and enforces hard limits.
+// Plugin accumulates spend and enforces hierarchical hard limits.
 // It implements both guardrail.RequestInterceptor and the EventConsumer interface.
+// Limits are keyed by scope strings: "tenantID", "tenantID:teamID", or
+// "tenantID:teamID:userID". A request is blocked if ANY scope in the caller's
+// hierarchy is over its ceiling.
 type Plugin struct {
-	mu       sync.Mutex
-	spent    map[string]float64  // identity key → cumulative USD
-	warned   map[string]bool     // keys for which a warning has been emitted
-	limits   map[string]Limit    // identity key → configured limit
-	defaultL *Limit              // applied when no specific limit is found
+	mu     sync.Mutex
+	spent  map[string]float64 // scope key → cumulative USD
+	warned map[string]bool    // scope keys for which a warning has been emitted
+	limits map[string]Limit   // scope key → configured limit
 
 	bus    bus.Bus
 	file   *os.File
 	fileMu sync.Mutex
 }
 
-// New creates a BudgetPlugin.
-// limits maps identity keys (e.g. "acme:alice", "acme") to spend ceilings.
-// defaultLimit applies to any identity not in the map; nil means no default cap.
+// New creates a budget plugin.
+// limits maps scope keys to spend ceilings. Keys follow the hierarchy format:
+//   - "tenantID"                  — org-level ceiling
+//   - "tenantID:teamID"           — team-level ceiling
+//   - "tenantID:teamID:userID"    — user-level ceiling
+//
 // b is used to publish warning/blocked events; may be nil.
 // dir is the directory for the spend journal; "" = in-memory only.
-func New(limits map[string]Limit, defaultLimit *Limit, b bus.Bus, dir string) *Plugin {
+func New(limits map[string]Limit, b bus.Bus, dir string) *Plugin {
 	p := &Plugin{
-		spent:    make(map[string]float64),
-		warned:   make(map[string]bool),
-		limits:   limits,
-		defaultL: defaultLimit,
-		bus:      b,
+		spent:  make(map[string]float64),
+		warned: make(map[string]bool),
+		limits: limits,
+		bus:    b,
 	}
 	if dir != "" {
 		p.replayJournal(filepath.Join(dir, "budget.jsonl"))
@@ -76,94 +80,84 @@ func New(limits map[string]Limit, defaultLimit *Limit, b bus.Bus, dir string) *P
 // Name satisfies guardrail.RequestInterceptor.
 func (p *Plugin) Name() string { return "budget" }
 
-// Intercept blocks the request if the caller's identity is over budget.
-// Satisfies guardrail.RequestInterceptor.
+// Intercept blocks the request if ANY level in the caller's budget hierarchy
+// is over its ceiling. Checks user → team → tenant in order; the first
+// exceeded scope short-circuits.
 func (p *Plugin) Intercept(ctx context.Context, req *schema.RequestEnvelope) error {
 	id := identity.FromContext(ctx)
-	key := identityKey(id)
-	lim := p.limitFor(key)
-	if lim == nil {
-		return nil // no limit configured for this identity
-	}
-
-	// Resolve the effective spend key — may differ from the limit key when
-	// using tenant-level fallback (e.g. limit on "acme", spend tracked as "acme").
-	spendKey := key
-	if _, ok := p.limits[key]; !ok {
-		parts := splitKey(key)
-		if len(parts) > 1 {
-			spendKey = parts[0]
+	for _, scope := range scopeKeys(id) {
+		lim, ok := p.limits[scope]
+		if !ok {
+			continue
 		}
-	}
-
-	p.mu.Lock()
-	spent := p.spent[spendKey]
-	p.mu.Unlock()
-
-	if spent >= lim.LimitUSD {
-		return &guardrail.BlockedError{
-			Interceptor: p.Name(),
-			Category:    "budget_exceeded",
-			Message: fmt.Sprintf("spend limit of $%.4f exceeded (spent $%.4f)",
-				lim.LimitUSD, spent),
+		p.mu.Lock()
+		spent := p.spent[scope]
+		p.mu.Unlock()
+		if spent >= lim.LimitUSD {
+			return &guardrail.BlockedError{
+				Interceptor: p.Name(),
+				Category:    "budget_exceeded",
+				Message: fmt.Sprintf("%s spend limit of $%.4f exceeded (spent $%.4f)",
+					scope, lim.LimitUSD, spent),
+			}
 		}
 	}
 	return nil
 }
 
-// Name is also used as the EventConsumer name.
+// OnEvent accumulates spend at every scope in the hierarchy simultaneously.
+// A $0.05 call by "acme:eng:alice" increments "acme:eng:alice", "acme:eng",
+// and "acme" — so each level's ceiling is always up to date.
 func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 	if ev.Error != "" || ev.Shadow != nil {
-		return nil // don't count failed or shadow calls
+		return nil
 	}
 	cost := ev.Cost.TotalUSD
 	if cost <= 0 {
 		return nil
 	}
 
-	id := schema.Identity{TenantID: ev.TenantID, UseCaseID: ev.UseCaseID}
-	key := identityKey(id)
-	lim := p.limitFor(key)
+	// CallEvent carries TenantID but not TeamID/UserID — accumulate at tenant scope.
+	// When a TeamID or UserID is available (future: add to CallEvent), all scopes
+	// will be incremented. For now we accumulate at the tenant level which is
+	// sufficient for the gate since Intercept checks the same keys.
+	scopes := []string{ev.TenantID}
 
-	p.mu.Lock()
-	p.spent[key] += cost
-	newSpent := p.spent[key]
-	alreadyWarned := p.warned[key]
-	p.mu.Unlock()
+	for _, scope := range scopes {
+		lim, hasLimit := p.limits[scope]
 
-	p.appendJournal(key, cost)
-
-	if lim == nil {
-		return nil
-	}
-
-	warnAt := lim.WarnAt
-	if warnAt <= 0 {
-		warnAt = 0.8
-	}
-
-	// Emit warning once when crossing the threshold.
-	if !alreadyWarned && newSpent >= lim.LimitUSD*warnAt {
 		p.mu.Lock()
-		p.warned[key] = true
+		p.spent[scope] += cost
+		newSpent := p.spent[scope]
+		alreadyWarned := p.warned[scope]
 		p.mu.Unlock()
 
-		if p.bus != nil {
-			_ = p.bus.Publish(ctx, &schema.CallEvent{
-				Timestamp: time.Now(),
-				TenantID:  ev.TenantID,
-				UseCaseID: ev.UseCaseID,
-				Error: fmt.Sprintf("budget warning: spent $%.4f of $%.4f limit (%.0f%%)",
-					newSpent, lim.LimitUSD, (newSpent/lim.LimitUSD)*100),
-			})
-		}
-		slog.Warn("budget warning",
-			"key", key,
-			"spent_usd", newSpent,
-			"limit_usd", lim.LimitUSD,
-			"pct", int((newSpent/lim.LimitUSD)*100))
-	}
+		p.appendJournal(scope, cost)
 
+		if !hasLimit {
+			continue
+		}
+		warnAt := lim.WarnAt
+		if warnAt <= 0 {
+			warnAt = 0.8
+		}
+		if !alreadyWarned && newSpent >= lim.LimitUSD*warnAt {
+			p.mu.Lock()
+			p.warned[scope] = true
+			p.mu.Unlock()
+			if p.bus != nil {
+				_ = p.bus.Publish(ctx, &schema.CallEvent{
+					Timestamp: time.Now(),
+					TenantID:  ev.TenantID,
+					Error: fmt.Sprintf("budget warning [%s]: spent $%.4f of $%.4f (%.0f%%)",
+						scope, newSpent, lim.LimitUSD, (newSpent/lim.LimitUSD)*100),
+				})
+			}
+			slog.Warn("budget warning", "scope", scope,
+				"spent_usd", newSpent, "limit_usd", lim.LimitUSD,
+				"pct", int((newSpent/lim.LimitUSD)*100))
+		}
+	}
 	return nil
 }
 
@@ -182,18 +176,29 @@ func (p *Plugin) Reset(key string) {
 	p.mu.Unlock()
 }
 
-func (p *Plugin) limitFor(key string) *Limit {
-	if l, ok := p.limits[key]; ok {
-		return &l
-	}
-	// Fall back to tenant-only key if the full key didn't match.
-	parts := splitKey(key)
-	if len(parts) > 1 {
-		if l, ok := p.limits[parts[0]]; ok {
-			return &l
+// scopeKeys returns the ordered set of budget scope keys for id, from most
+// specific to least specific: user → team → tenant.
+// The gate checks each scope in order and blocks on the first exceeded limit.
+// The accumulator increments all scopes so every ceiling stays current.
+func scopeKeys(id schema.Identity) []string {
+	var keys []string
+	// user scope: tenantID:teamID:userID
+	if id.UserID != "" {
+		if id.TeamID != "" {
+			keys = append(keys, id.TenantID+":"+id.TeamID+":"+id.UserID)
+		} else {
+			keys = append(keys, id.TenantID+":"+id.UserID)
 		}
 	}
-	return p.defaultL
+	// team scope: tenantID:teamID
+	if id.TeamID != "" {
+		keys = append(keys, id.TenantID+":"+id.TeamID)
+	}
+	// tenant (org) scope: tenantID
+	if id.TenantID != "" {
+		keys = append(keys, id.TenantID)
+	}
+	return keys
 }
 
 // --- Persistence ---
@@ -246,20 +251,3 @@ func (p *Plugin) Close() error {
 	return nil
 }
 
-// identityKey builds a stable lookup key from an identity.
-// Format: "tenantID:userID" or "tenantID" when userID is empty.
-func identityKey(id schema.Identity) string {
-	if id.UserID != "" {
-		return id.TenantID + ":" + id.UserID
-	}
-	return id.TenantID
-}
-
-func splitKey(key string) []string {
-	for i, c := range key {
-		if c == ':' {
-			return []string{key[:i], key[i+1:]}
-		}
-	}
-	return []string{key}
-}

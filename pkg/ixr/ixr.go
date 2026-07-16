@@ -182,20 +182,30 @@ func Start(opts ...Option) error {
 		return observability.RequestIDMiddleware(observability.TraceMiddleware(h))
 	}
 
-	// --- Budget enforcement (optional) ---
+	// --- Budget enforcement — hierarchical (org → team → user) ---
 	var interceptors pkgguardrail.Chain
 	budgetLimits := make(map[string]budgetplugin.Limit)
 	if fileCfg != nil {
 		for tenantID, tc := range fileCfg.Tenants {
+			// Org-level ceiling.
 			if tc.Quotas.MonthlyUSDCap > 0 {
 				budgetLimits[tenantID] = budgetplugin.Limit{
 					LimitUSD: tc.Quotas.MonthlyUSDCap,
 					WarnAt:   0.8,
 				}
 			}
+			// Team-level ceilings: tenantID:teamID
+			for teamID, team := range tc.Teams {
+				if team.Quotas.MonthlyUSDCap > 0 {
+					budgetLimits[tenantID+":"+teamID] = budgetplugin.Limit{
+						LimitUSD: team.Quotas.MonthlyUSDCap,
+						WarnAt:   0.8,
+					}
+				}
+			}
 		}
 	}
-	budgetPlugin := budgetplugin.New(budgetLimits, nil, memBus, os.Getenv("IXR_BUDGET_DIR"))
+	budgetPlugin := budgetplugin.New(budgetLimits, memBus, os.Getenv("IXR_BUDGET_DIR"))
 	defer budgetPlugin.Close()
 	mgr.Register(budgetPlugin) // accumulates spend post-call
 	if len(budgetLimits) > 0 {
