@@ -62,6 +62,8 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 		ErrorMessage:  ev.Error,
 		FinishReason:  finishReason,
 		Timestamp:     ev.Timestamp,
+		FallbackUsed:  ev.FallbackUsed,
+		FallbackFrom:  ev.FallbackFrom,
 	}
 	if ev.Shadow != nil {
 		rec.Shadow = true

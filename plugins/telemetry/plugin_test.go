@@ -71,3 +71,26 @@ func TestOnEvent_PrimaryCallNotTaggedShadow(t *testing.T) {
 		t.Errorf("ShadowOf should be empty for a primary call, got %q", rec.ShadowOf)
 	}
 }
+
+func TestOnEvent_PropagatesFallbackInfo(t *testing.T) {
+	sink := &captureSink{}
+	p := New(noopPerfStore{}, sink)
+
+	ev := &schema.CallEvent{
+		Model:        "llama-4-scout",
+		Provider:     "llama",
+		FallbackUsed: true,
+		FallbackFrom: "gpt-5.3-codex",
+	}
+	if err := p.OnEvent(context.Background(), ev); err != nil {
+		t.Fatalf("OnEvent error: %v", err)
+	}
+
+	rec := sink.recs[0]
+	if !rec.FallbackUsed {
+		t.Error("expected FallbackUsed=true to propagate onto the TelemetryRecord")
+	}
+	if rec.FallbackFrom != "gpt-5.3-codex" {
+		t.Errorf("FallbackFrom: got %q, want gpt-5.3-codex", rec.FallbackFrom)
+	}
+}

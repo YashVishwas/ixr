@@ -112,9 +112,11 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hint := taskHintFromHeaders(r, &req)
+	var fallbackChain []routing.Candidate
+
 	autoRouted := req.Model == "auto"
 	if autoRouted {
-		hint := taskHintFromHeaders(r, &req)
 		if h.engine != nil {
 			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
 			if err != nil || decision.Model == "" {
@@ -122,14 +124,23 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			req.Model = decision.Model
+			fallbackChain = decision.FallbackChain
 		} else {
-			resolved := routing.Route(hint)
-			if resolved == "" {
+			decision := routing.RouteWithDecision(hint)
+			if decision.Model == "" {
 				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
 				return
 			}
-			req.Model = resolved
+			req.Model = decision.Model
+			fallbackChain = decision.FallbackChain
 		}
+	} else if _, inCatalog := routing.Lookup(req.Model); inCatalog {
+		// Escalation only applies when we have real ContextWindow data to
+		// escalate against. For an explicit model outside the catalog (the
+		// common case — most deployed models aren't catalog entries), there's
+		// no chain to escalate through, so behavior is unchanged: a single
+		// direct call, surfaced as a 502 on failure.
+		fallbackChain = routing.FallbackChainFor(req.Model, hint, 3)
 	}
 
 	p, err := h.router(req.Model)
@@ -139,7 +150,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		h.handleStream(w, r, p, &req, autoRouted)
+		h.handleStream(w, r, p, &req, autoRouted, fallbackChain)
 		return
 	}
 
@@ -149,10 +160,31 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	decision := routing.RoutingDecision{Model: req.Model}
-	result, err := routing.Execute(r.Context(), decision, reasoning.AdjustTokenBudget(&req), routing.ProviderLookup(h.router), h.retryCfg)
-	resp := result.Response
+	var resp *schema.ResponseEnvelope
+	var result routing.ExecuteResult
+	if len(fallbackChain) > 0 {
+		decision := routing.RoutingDecision{Model: req.Model, FallbackChain: fallbackChain}
+		result, err = routing.Execute(r.Context(), decision, reasoning.AdjustTokenBudget(&req), routing.ProviderLookup(h.router), h.retryCfg)
+		resp = result.Response
+		// result reflects whichever candidate actually produced the outcome —
+		// on failure that's the last one attempted, not necessarily the
+		// primary — so p/req.Model must not be used below this point.
+		if result.Provider != nil {
+			p = result.Provider
+		}
+	} else {
+		resp, err = p.Chat(r.Context(), reasoning.AdjustTokenBudget(&req))
+		result.Model = req.Model
+	}
 	latency := time.Since(start)
+	usedModel := req.Model
+	if result.Model != "" {
+		usedModel = result.Model
+	}
+	usedProvider := ""
+	if p != nil {
+		usedProvider = p.Name()
+	}
 
 	if h.cbRegistry != nil {
 		h.cbRegistry.RecordOutcome(req.Model, err == nil)
@@ -167,15 +199,15 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			tokIn = resp.Usage.PromptTokens
 			tokOut = resp.Usage.CompletionTokens
 		}
-		h.metrics.Record(p.Name(), req.Model, status, latency, tokIn, tokOut)
+		h.metrics.Record(usedProvider, usedModel, status, latency, tokIn, tokOut)
 	}
 
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
 			Timestamp:  start,
-			Provider:   p.Name(),
-			Model:      req.Model,
+			Provider:   usedProvider,
+			Model:      usedModel,
 			Latency:    schema.EventLatency(latency),
 			Request:    req,
 			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
@@ -191,7 +223,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ev.TokensIn = resp.Usage.PromptTokens
 			ev.TokensOut = resp.Usage.CompletionTokens
 			ev.Response = *resp
-			ev.Cost = cost.ForUsage(req.Model, ev.TokensIn, ev.TokensOut)
+			ev.Cost = cost.ForUsage(usedModel, ev.TokensIn, ev.TokensOut)
+			ev.FallbackUsed = result.FallbackUsed
+			ev.FallbackFrom = result.FallbackFrom
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error", "err", pubErr)
@@ -207,7 +241,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		slog.Error("provider error", "provider", p.Name(), "model", req.Model, "err", err)
+		slog.Error("provider error", "provider", usedProvider, "model", usedModel, "err", err)
 		writeError(w, http.StatusBadGateway, "provider_error", "upstream provider returned an error")
 		return
 	}
@@ -218,7 +252,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope, autoRouted bool) {
+func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope, autoRouted bool, fallbackChain []routing.Candidate) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_error", "server does not support streaming")
@@ -235,8 +269,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	var totalIn, totalOut int
 	start := time.Now()
 
-	decision := routing.RoutingDecision{Model: req.Model}
-	_, streamErr := routing.ExecuteStream(r.Context(), decision, reasoning.AdjustTokenBudget(req), routing.ProviderLookup(h.router), h.retryCfg, func(chunk provider.StreamChunk) error {
+	onChunk := func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
@@ -246,7 +279,23 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		}
 		flusher.Flush()
 		return nil
-	})
+	}
+
+	var streamErr error
+	var result routing.ExecuteResult
+	if len(fallbackChain) > 0 {
+		decision := routing.RoutingDecision{Model: req.Model, FallbackChain: fallbackChain}
+		result, streamErr = routing.ExecuteStream(r.Context(), decision, reasoning.AdjustTokenBudget(req), routing.ProviderLookup(h.router), h.retryCfg, onChunk)
+		// result reflects whichever candidate actually produced the outcome —
+		// on failure that's the last one attempted, not necessarily the
+		// primary — so p/req.Model must not be used below this point.
+		if result.Provider != nil {
+			p = result.Provider
+		}
+	} else {
+		streamErr = p.Stream(r.Context(), reasoning.AdjustTokenBudget(req), onChunk)
+		result.Model = req.Model
+	}
 
 	if h.cbRegistry != nil {
 		h.cbRegistry.RecordOutcome(req.Model, streamErr == nil)
@@ -256,20 +305,29 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	flusher.Flush()
 
 	streamLatency := time.Since(start)
+	usedModel := req.Model
+	if result.Model != "" {
+		usedModel = result.Model
+	}
+	usedProvider := ""
+	if p != nil {
+		usedProvider = p.Name()
+	}
+
 	if h.metrics != nil {
 		status := http.StatusOK
 		if streamErr != nil {
 			status = http.StatusBadGateway
 		}
-		h.metrics.Record(p.Name(), req.Model, status, streamLatency, totalIn, totalOut)
+		h.metrics.Record(usedProvider, usedModel, status, streamLatency, totalIn, totalOut)
 	}
 
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
 			Timestamp:  start,
-			Provider:   p.Name(),
-			Model:      req.Model,
+			Provider:   usedProvider,
+			Model:      usedModel,
 			Latency:    schema.EventLatency(streamLatency),
 			Request:    *req,
 			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
@@ -284,7 +342,9 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
 		} else {
-			ev.Cost = cost.ForUsage(req.Model, totalIn, totalOut)
+			ev.Cost = cost.ForUsage(usedModel, totalIn, totalOut)
+			ev.FallbackUsed = result.FallbackUsed
+			ev.FallbackFrom = result.FallbackFrom
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error (stream)", "err", pubErr)
@@ -292,7 +352,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	}
 
 	if streamErr != nil {
-		slog.Error("stream error", "provider", p.Name(), "model", req.Model, "err", streamErr)
+		slog.Error("stream error", "provider", usedProvider, "model", usedModel, "err", streamErr)
 	}
 }
 

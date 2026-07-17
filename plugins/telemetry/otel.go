@@ -138,4 +138,3 @@ func normaliseProvider(provider string) string {
 		return provider
 	}
 }
-
