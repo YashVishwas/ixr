@@ -31,12 +31,12 @@ type rulePattern struct {
 var rulePatterns = []rulePattern{
 	{
 		category: "name",
-		re:       regexp.MustCompile(`(?i)(?:my name is|i(?:'m| am) called|call me|i go by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)`),
+		re:       regexp.MustCompile(`(?i:my name is|i(?:'m| am) called|call me|i go by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)`),
 		template: func(m string) string { return "User's name is " + m },
 	},
 	{
 		category: "employer",
-		re:       regexp.MustCompile(`(?i)(?:i (?:work|am working) (?:at|for)|i(?:'m| am) (?:at|with))\s+([A-Z][^\.,!?\n]{2,40}?)(?:[,.\s]|$)`),
+		re:       regexp.MustCompile(`(?i:i (?:work|am working) (?:at|for)|i(?:'m| am) (?:at|with))\s+([A-Z][^\.,!?\n]{2,40}?)(?:[,.\s]|$)`),
 		template: func(m string) string { return "User works at " + strings.TrimSpace(m) },
 	},
 	{
@@ -51,7 +51,7 @@ var rulePatterns = []rulePattern{
 	},
 	{
 		category: "location",
-		re:       regexp.MustCompile(`(?i)(?:i(?:'m| am) (?:based in|located in|living in)|i live in)\s+([A-Z][^\.,!?\n]{2,40}?)(?:[,.\s]|$)`),
+		re:       regexp.MustCompile(`(?i:i(?:'m| am) (?:based in|located in|living in)|i live in)\s+([A-Z][^\.,!?\n]{2,40}?)(?:[,.\s]|$)`),
 		template: func(m string) string { return "User is based in " + strings.TrimSpace(m) },
 	},
 	{

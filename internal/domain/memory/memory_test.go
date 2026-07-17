@@ -121,6 +121,33 @@ func TestRuleExtractor_Name(t *testing.T) {
 	}
 }
 
+func TestRuleExtractor_NameDoesNotSwallowTrailingWord(t *testing.T) {
+	// Regression: the name pattern's trigger phrase is meant to be
+	// case-insensitive while the captured name stays case-sensitive
+	// (["A-Z"] bounds it to an actual proper noun). A prior version applied
+	// (?i) to the whole pattern, which made [A-Z] match lowercase too, so
+	// "my name is Arun and I work at..." captured "Arun and" instead of "Arun".
+	ext := RuleExtractor{}
+	entries, _ := ext.Extract(context.Background(), "acme", ConversationTurn{
+		UserMessage: "Hi, my name is Arun and I work at IXLabs.",
+	})
+	var name, employer string
+	for _, e := range entries {
+		switch e.Category {
+		case "name":
+			name = e.Content
+		case "employer":
+			employer = e.Content
+		}
+	}
+	if name != "User's name is Arun" {
+		t.Errorf("name: got %q, want %q", name, "User's name is Arun")
+	}
+	if employer != "User works at IXLabs" {
+		t.Errorf("employer: got %q, want %q", employer, "User works at IXLabs")
+	}
+}
+
 func TestRuleExtractor_Project(t *testing.T) {
 	ext := RuleExtractor{}
 	entries, _ := ext.Extract(context.Background(), "acme", ConversationTurn{

@@ -61,15 +61,10 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 // userKeyFromEvent builds a stable key from event fields.
 // Returns "" when UserID is not available (memories are user-scoped).
 func userKeyFromEvent(ev *schema.CallEvent) string {
-	// CallEvent doesn't carry UserID directly — it's in Identity which is
-	// set in request context but not serialised onto CallEvent yet.
-	// We use TenantID alone when no finer grain is available.
-	// When UserID is added to CallEvent in a future schema version,
-	// update this to: ev.TenantID + ":" + ev.UserID
-	if ev.TenantID == "" || ev.TenantID == "default" {
+	if ev.TenantID == "" || ev.TenantID == "default" || ev.UserID == "" {
 		return ""
 	}
-	return ev.TenantID
+	return ev.TenantID + ":" + ev.UserID
 }
 
 func lastUserMessage(msgs []schema.Message) string {

@@ -10,8 +10,8 @@ import (
 
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
-	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/pkg/schema"
+	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 )
 
 const defaultMemoryTopK = 5
@@ -86,12 +86,14 @@ func (m *MemoryMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // memoryUserKey returns a store key for the identity, or "" if the identity
-// is anonymous (no concrete TenantID or UserID to scope memories to).
+// is anonymous (no concrete TenantID+UserID to scope memories to). Must stay
+// in sync with plugins/memory.userKeyFromEvent, which writes entries under
+// the same "tenantID:userID" format.
 func memoryUserKey(id schema.Identity) string {
-	if id.TenantID == "" || id.TenantID == "default" {
+	if id.TenantID == "" || id.TenantID == "default" || id.UserID == "" {
 		return ""
 	}
-	return id.TenantID
+	return id.TenantID + ":" + id.UserID
 }
 
 // RetrieveMemoriesForContext is a helper for SessionMiddleware integration:
