@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -104,7 +106,7 @@ func TestStore_Persistence(t *testing.T) {
 // needing to actually key memory by session ID.
 
 func TestStore_ExpiresEntriesOlderThanTTL(t *testing.T) {
-	s := NewMemoryStoreWithLimits("", time.Hour, 0)
+	s := NewMemoryStoreWithLimits("", time.Hour, 0, 0)
 	ctx := context.Background()
 
 	_ = s.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "stale", CreatedAt: time.Now().Add(-2 * time.Hour)})
@@ -122,7 +124,7 @@ func TestStore_ExpiresEntriesOlderThanTTL(t *testing.T) {
 }
 
 func TestStore_ZeroTTLNeverExpires(t *testing.T) {
-	s := NewMemoryStoreWithLimits("", 0, 0)
+	s := NewMemoryStoreWithLimits("", 0, 0, 0)
 	ctx := context.Background()
 
 	_ = s.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "ancient", CreatedAt: time.Now().Add(-24 * 365 * time.Hour)})
@@ -134,7 +136,7 @@ func TestStore_ZeroTTLNeverExpires(t *testing.T) {
 }
 
 func TestStore_CapsEntriesPerUser(t *testing.T) {
-	s := NewMemoryStoreWithLimits("", 0, 5)
+	s := NewMemoryStoreWithLimits("", 0, 5, 0)
 	ctx := context.Background()
 
 	for i := 0; i < 20; i++ {
@@ -156,7 +158,7 @@ func TestStore_ReplayCompactsExpiredAndOverCapEntries(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	s1 := NewMemoryStoreWithLimits(dir, time.Hour, 2)
+	s1 := NewMemoryStoreWithLimits(dir, time.Hour, 2, 0)
 	_ = s1.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "stale", CreatedAt: time.Now().Add(-2 * time.Hour)})
 	for i := 0; i < 5; i++ {
 		_ = s1.Save(ctx, Entry{UserKey: "acme", Category: "preference", Content: "fact", CreatedAt: time.Now()})
@@ -166,21 +168,129 @@ func TestStore_ReplayCompactsExpiredAndOverCapEntries(t *testing.T) {
 	// Reopening should replay only what's still live and cap-compliant, and
 	// rewrite the journal to match — the file shouldn't keep growing forever
 	// across restarts either.
-	s2 := NewMemoryStoreWithLimits(dir, time.Hour, 2)
+	s2 := NewMemoryStoreWithLimits(dir, time.Hour, 2, 0)
 	all, _ := s2.All(ctx, "acme")
 	if len(all) != 2 {
 		t.Fatalf("expected replay to cap at 2 live entries, got %d: %+v", len(all), all)
 	}
 	s2.Close()
 
-	raw, err := os.ReadFile(filepath.Join(dir, "memory.jsonl"))
+	if lines := journalLineCount(t, filepath.Join(dir, "memory.jsonl")); lines != 2 {
+		t.Fatalf("expected the journal to be compacted to 2 lines on disk, got %d", lines)
+	}
+}
+
+func journalLineCount(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Count(strings.TrimSpace(string(raw)), "\n") + 1
-	if lines != 2 {
-		t.Fatalf("expected the journal to be compacted to 2 lines on disk, got %d", lines)
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return 0
 	}
+	return strings.Count(trimmed, "\n") + 1
+}
+
+func TestStore_PeriodicCompactionShrinksJournalWithoutRestart(t *testing.T) {
+	// The bug this closes: appendJournal writes every Save unconditionally,
+	// so without periodic compaction the on-disk file grows forever across
+	// the lifetime of a single long-running process, even though in-memory
+	// usage already stays bounded by TTL/maxPerUser. Only a restart used to
+	// shrink it (via replayJournal's one-time compaction).
+	dir := t.TempDir()
+	ctx := context.Background()
+	path := filepath.Join(dir, "memory.jsonl")
+
+	s := NewMemoryStoreWithLimits(dir, 0, 2, 0) // compaction driven manually below, not on a ticker
+	defer s.Close()
+
+	for i := 0; i < 10; i++ {
+		_ = s.Save(ctx, Entry{UserKey: "acme", Category: "preference", Content: "fact", CreatedAt: time.Now()})
+	}
+	if got := journalLineCount(t, path); got != 10 {
+		t.Fatalf("expected all 10 raw appends on disk before compaction, got %d", got)
+	}
+
+	s.compactNow()
+
+	if got := journalLineCount(t, path); got != 2 {
+		t.Fatalf("expected compactNow to shrink the journal to the 2-entry cap without a restart, got %d", got)
+	}
+	all, _ := s.All(ctx, "acme")
+	if len(all) != 2 {
+		t.Fatalf("in-memory state should still reflect the cap after compaction, got %d", len(all))
+	}
+}
+
+func TestStore_ConcurrentSavesDuringCompactionAreNotLost(t *testing.T) {
+	// compactNow holds s.mu for its whole duration specifically so a Save
+	// racing with it can't have its journal line silently dropped by the
+	// rewrite — this exercises that under -race with saves and compactions
+	// interleaved from multiple goroutines.
+	dir := t.TempDir()
+	ctx := context.Background()
+	s := NewMemoryStoreWithLimits(dir, 0, 1000, 0)
+	defer s.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = s.Save(ctx, Entry{UserKey: "acme", Category: "c" + strconv.Itoa(i), Content: "fact"})
+		}(i)
+	}
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.compactNow()
+		}()
+	}
+	wg.Wait()
+	s.compactNow() // final pass so the journal reflects whatever s.entries settled on
+
+	all, _ := s.All(ctx, "acme")
+	inMemoryCount := len(all)
+	onDiskCount := journalLineCount(t, filepath.Join(dir, "memory.jsonl"))
+	if onDiskCount != inMemoryCount {
+		t.Fatalf("journal (%d lines) should match in-memory state (%d entries) after compaction — a mismatch means a concurrent Save's line was dropped", onDiskCount, inMemoryCount)
+	}
+}
+
+func TestStore_PeriodicCompactionRunsOnTicker(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	path := filepath.Join(dir, "memory.jsonl")
+
+	s := NewMemoryStoreWithLimits(dir, 0, 2, 20*time.Millisecond)
+	defer s.Close()
+
+	for i := 0; i < 10; i++ {
+		_ = s.Save(ctx, Entry{UserKey: "acme", Category: "preference", Content: "fact", CreatedAt: time.Now()})
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if journalLineCount(t, path) == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected background compaction to shrink the journal to 2 lines within 2s, got %d", journalLineCount(t, path))
+}
+
+func TestStore_CloseStopsBackgroundCompaction(t *testing.T) {
+	dir := t.TempDir()
+	s := NewMemoryStoreWithLimits(dir, 0, 0, 5*time.Millisecond)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	// Give a stray tick a chance to fire if the goroutine wasn't actually
+	// stopped — a write to the now-closed file would be the observable bug.
+	time.Sleep(50 * time.Millisecond)
 }
 
 // --- RuleExtractor ---

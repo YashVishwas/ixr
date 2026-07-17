@@ -45,8 +45,8 @@ import (
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
-	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
@@ -122,11 +122,13 @@ func Start(opts ...Option) error {
 	router := buildRouter(registry)
 
 	// --- User memory store (optional) ---
-	// Bounded by default (1h TTL, 50 entries/user) rather than accumulating
-	// forever — see internal/domain/memory.defaultMemoryTTL for why.
+	// Bounded by default (1h TTL, 50 entries/user, journal recompacted every
+	// 15m) rather than accumulating forever — see
+	// internal/domain/memory.defaultMemoryTTL for why.
 	memoryTTL := time.Duration(envInt("IXR_MEMORY_TTL_SEC", 3600)) * time.Second
 	memoryMaxPerUser := envInt("IXR_MEMORY_MAX_PER_USER", 50)
-	memoryStore := memory.NewMemoryStoreWithLimits(os.Getenv("IXR_MEMORY_DIR"), memoryTTL, memoryMaxPerUser)
+	memoryCompactInterval := time.Duration(envInt("IXR_MEMORY_COMPACT_INTERVAL_SEC", 900)) * time.Second
+	memoryStore := memory.NewMemoryStoreWithLimits(os.Getenv("IXR_MEMORY_DIR"), memoryTTL, memoryMaxPerUser, memoryCompactInterval)
 	defer memoryStore.Close()
 
 	// --- Event bus + plugins ---

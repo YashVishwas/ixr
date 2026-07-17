@@ -51,6 +51,12 @@ const (
 	defaultMaxEntriesPerUser = 50
 )
 
+// defaultCompactInterval is how often a persistent store rewrites its
+// journal to drop expired/over-cap lines while running, so the file doesn't
+// grow unbounded between restarts the way it used to (compaction previously
+// only ran once, at startup).
+const defaultCompactInterval = 15 * time.Minute
+
 // MemoryStore is an in-process store backed by an optional append-only journal.
 // Safe for concurrent use. Entries older than ttl are treated as expired and
 // dropped; each user's entry list is capped at maxPerUser regardless of age.
@@ -58,24 +64,40 @@ type MemoryStore struct {
 	mu         sync.Mutex
 	entries    map[string][]Entry // userKey → ordered list (oldest first)
 	file       *os.File
+	filePath   string
 	fileMu     sync.Mutex
 	ttl        time.Duration
 	maxPerUser int
+
+	stopCompact chan struct{}
+	compactDone chan struct{}
 }
 
 // NewMemoryStore creates a store with the default bounds (1 hour TTL, 50
-// entries per user). dir="" means in-memory only.
+// entries per user, journal recompacted every 15 minutes if persistent).
+// dir="" means in-memory only.
 func NewMemoryStore(dir string) *MemoryStore {
-	return NewMemoryStoreWithLimits(dir, defaultMemoryTTL, defaultMaxEntriesPerUser)
+	return NewMemoryStoreWithLimits(dir, defaultMemoryTTL, defaultMaxEntriesPerUser, defaultCompactInterval)
 }
 
 // NewMemoryStoreWithLimits creates a store whose entries expire after ttl
 // (<=0 means entries never expire) and whose per-user entry list is capped
 // at maxPerUser (<=0 means unbounded). dir="" means in-memory only.
-func NewMemoryStoreWithLimits(dir string, ttl time.Duration, maxPerUser int) *MemoryStore {
+//
+// When dir is set and compactInterval > 0, the journal is periodically
+// rewritten in the background to drop expired/over-cap lines — otherwise a
+// long-running process would still grow the file forever even though
+// in-memory usage stays bounded, since appendJournal writes every Save
+// unconditionally. compactInterval <= 0 disables background compaction;
+// the journal is still compacted once on startup during replay.
+func NewMemoryStoreWithLimits(dir string, ttl time.Duration, maxPerUser int, compactInterval time.Duration) *MemoryStore {
 	s := &MemoryStore{entries: make(map[string][]Entry), ttl: ttl, maxPerUser: maxPerUser}
 	if dir != "" {
-		s.replayJournal(filepath.Join(dir, "memory.jsonl"))
+		s.filePath = filepath.Join(dir, "memory.jsonl")
+		s.replayJournal(s.filePath)
+		if compactInterval > 0 {
+			s.startPeriodicCompaction(compactInterval)
+		}
 	}
 	return s
 }
@@ -152,8 +174,72 @@ func (s *MemoryStore) pruneLocked(entries []Entry) []Entry {
 	return entries
 }
 
-// Close flushes and closes the journal file.
+// startPeriodicCompaction runs compactNow on a ticker until Close is called.
+func (s *MemoryStore) startPeriodicCompaction(interval time.Duration) {
+	s.stopCompact = make(chan struct{})
+	s.compactDone = make(chan struct{})
+	go func() {
+		defer close(s.compactDone)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.compactNow()
+			case <-s.stopCompact:
+				return
+			}
+		}
+	}()
+}
+
+// compactNow prunes every user's entries and rewrites the journal to match,
+// so a long-running process doesn't grow the file forever even though
+// in-memory usage already stays bounded via pruneLocked on every read/write.
+//
+// Holds s.mu for the whole operation, including the disk write — a Save that
+// arrives mid-compaction must either land before the snapshot (and so is
+// included in it) or block until compaction finishes (and so writes its own
+// journal line after the file has been reopened). Given the caps already in
+// place, the snapshot+write is small and fast; without holding s.mu
+// throughout, a Save landing between the snapshot and the file swap could
+// have its journal line silently dropped by the rewrite.
+func (s *MemoryStore) compactNow() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var live []Entry
+	for userKey, entries := range s.entries {
+		pruned := s.pruneLocked(entries)
+		if len(pruned) == 0 {
+			delete(s.entries, userKey)
+			continue
+		}
+		s.entries[userKey] = pruned
+		live = append(live, pruned...)
+	}
+
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	if s.file != nil {
+		s.file.Close()
+		s.file = nil
+	}
+	s.compactJournal(s.filePath, live)
+	if af, err := os.OpenFile(s.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+		s.file = af
+	} else {
+		slog.Warn("memory: journal unavailable after compaction, running in-memory only", "err", err)
+	}
+}
+
+// Close stops background compaction (if running) and flushes/closes the
+// journal file.
 func (s *MemoryStore) Close() error {
+	if s.stopCompact != nil {
+		close(s.stopCompact)
+		<-s.compactDone
+	}
 	if s.file != nil {
 		return s.file.Close()
 	}
