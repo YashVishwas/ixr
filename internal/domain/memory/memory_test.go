@@ -2,6 +2,9 @@ package memory
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,6 +95,92 @@ func TestStore_Persistence(t *testing.T) {
 		t.Fatalf("expected replayed entry, got: %+v", entries)
 	}
 	s2.Close()
+}
+
+// --- Bounded growth: TTL + per-user cap ---
+// Without these, both the in-process map and the on-disk journal grow
+// forever as long as a user keeps talking — this is what "unlimited memory"
+// meant in practice. Bounding it approximates "scoped to a session" without
+// needing to actually key memory by session ID.
+
+func TestStore_ExpiresEntriesOlderThanTTL(t *testing.T) {
+	s := NewMemoryStoreWithLimits("", time.Hour, 0)
+	ctx := context.Background()
+
+	_ = s.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "stale", CreatedAt: time.Now().Add(-2 * time.Hour)})
+	_ = s.Save(ctx, Entry{UserKey: "acme", Category: "project", Content: "fresh", CreatedAt: time.Now()})
+
+	entries, _ := s.Recent(ctx, "acme", 10)
+	if len(entries) != 1 || entries[0].Content != "fresh" {
+		t.Fatalf("expected only the non-expired entry, got: %+v", entries)
+	}
+
+	all, _ := s.All(ctx, "acme")
+	if len(all) != 1 {
+		t.Fatalf("expired entry should be pruned from storage, not just filtered on read: %+v", all)
+	}
+}
+
+func TestStore_ZeroTTLNeverExpires(t *testing.T) {
+	s := NewMemoryStoreWithLimits("", 0, 0)
+	ctx := context.Background()
+
+	_ = s.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "ancient", CreatedAt: time.Now().Add(-24 * 365 * time.Hour)})
+
+	entries, _ := s.Recent(ctx, "acme", 10)
+	if len(entries) != 1 {
+		t.Fatalf("ttl<=0 should mean entries never expire, got: %+v", entries)
+	}
+}
+
+func TestStore_CapsEntriesPerUser(t *testing.T) {
+	s := NewMemoryStoreWithLimits("", 0, 5)
+	ctx := context.Background()
+
+	for i := 0; i < 20; i++ {
+		_ = s.Save(ctx, Entry{
+			UserKey:   "acme",
+			Category:  "preference",
+			Content:   "fact",
+			CreatedAt: time.Now().Add(time.Duration(i) * time.Second),
+		})
+	}
+
+	all, _ := s.All(ctx, "acme")
+	if len(all) != 5 {
+		t.Fatalf("expected storage capped at 5 entries regardless of how many were saved, got %d", len(all))
+	}
+}
+
+func TestStore_ReplayCompactsExpiredAndOverCapEntries(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	s1 := NewMemoryStoreWithLimits(dir, time.Hour, 2)
+	_ = s1.Save(ctx, Entry{UserKey: "acme", Category: "name", Content: "stale", CreatedAt: time.Now().Add(-2 * time.Hour)})
+	for i := 0; i < 5; i++ {
+		_ = s1.Save(ctx, Entry{UserKey: "acme", Category: "preference", Content: "fact", CreatedAt: time.Now()})
+	}
+	s1.Close()
+
+	// Reopening should replay only what's still live and cap-compliant, and
+	// rewrite the journal to match — the file shouldn't keep growing forever
+	// across restarts either.
+	s2 := NewMemoryStoreWithLimits(dir, time.Hour, 2)
+	all, _ := s2.All(ctx, "acme")
+	if len(all) != 2 {
+		t.Fatalf("expected replay to cap at 2 live entries, got %d: %+v", len(all), all)
+	}
+	s2.Close()
+
+	raw, err := os.ReadFile(filepath.Join(dir, "memory.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Count(strings.TrimSpace(string(raw)), "\n") + 1
+	if lines != 2 {
+		t.Fatalf("expected the journal to be compacted to 2 lines on disk, got %d", lines)
+	}
 }
 
 // --- RuleExtractor ---

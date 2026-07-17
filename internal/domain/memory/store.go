@@ -1,7 +1,9 @@
-// Package memory provides persistent user-level fact storage for ixr.
-// Facts are extracted from conversation turns and stored keyed by userKey
-// (tenantID:userID). On new sessions, relevant memories are retrieved and
-// injected as context so the model remembers the user across conversations.
+// Package memory provides bounded, short-lived user-level fact storage for
+// ixr. Facts are extracted from conversation turns and stored keyed by
+// userKey (tenantID:userID). On new sessions, relevant memories are
+// retrieved and injected as context so the model remembers the user for as
+// long as those facts stay within the store's TTL — this is intentionally
+// not indefinite persistent memory; see MemoryStore's TTL/maxPerUser bounds.
 package memory
 
 import (
@@ -19,10 +21,10 @@ import (
 // Entry is one stored fact about a user.
 type Entry struct {
 	ID        string    `json:"id"`
-	UserKey   string    `json:"user_key"`   // tenantID:userID
-	Category  string    `json:"category"`   // name | employer | project | location | role | preference | other
-	Content   string    `json:"content"`    // "User's name is Arun"
-	Source    string    `json:"source"`     // "rule" | "llm"
+	UserKey   string    `json:"user_key"` // tenantID:userID
+	Category  string    `json:"category"` // name | employer | project | location | role | preference | other
+	Content   string    `json:"content"`  // "User's name is Arun"
+	Source    string    `json:"source"`   // "rule" | "llm"
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -38,18 +40,40 @@ type Store interface {
 	All(ctx context.Context, userKey string) ([]Entry, error)
 }
 
+// Defaults applied by NewMemoryStore. Without some bound, entries accumulate
+// forever — both the in-process map and the on-disk journal grow without
+// limit as long as a user keeps talking. ttl keeps memory relevant for
+// roughly a session's worth of time rather than persisting indefinitely;
+// maxPerUser is a hard backstop against runaway growth within that window.
+// Use NewMemoryStoreWithLimits to override either.
+const (
+	defaultMemoryTTL         = time.Hour
+	defaultMaxEntriesPerUser = 50
+)
+
 // MemoryStore is an in-process store backed by an optional append-only journal.
-// Safe for concurrent use.
+// Safe for concurrent use. Entries older than ttl are treated as expired and
+// dropped; each user's entry list is capped at maxPerUser regardless of age.
 type MemoryStore struct {
-	mu      sync.Mutex
-	entries map[string][]Entry // userKey → ordered list (oldest first)
-	file    *os.File
-	fileMu  sync.Mutex
+	mu         sync.Mutex
+	entries    map[string][]Entry // userKey → ordered list (oldest first)
+	file       *os.File
+	fileMu     sync.Mutex
+	ttl        time.Duration
+	maxPerUser int
 }
 
-// NewMemoryStore creates a store. dir="" means in-memory only.
+// NewMemoryStore creates a store with the default bounds (1 hour TTL, 50
+// entries per user). dir="" means in-memory only.
 func NewMemoryStore(dir string) *MemoryStore {
-	s := &MemoryStore{entries: make(map[string][]Entry)}
+	return NewMemoryStoreWithLimits(dir, defaultMemoryTTL, defaultMaxEntriesPerUser)
+}
+
+// NewMemoryStoreWithLimits creates a store whose entries expire after ttl
+// (<=0 means entries never expire) and whose per-user entry list is capped
+// at maxPerUser (<=0 means unbounded). dir="" means in-memory only.
+func NewMemoryStoreWithLimits(dir string, ttl time.Duration, maxPerUser int) *MemoryStore {
+	s := &MemoryStore{entries: make(map[string][]Entry), ttl: ttl, maxPerUser: maxPerUser}
 	if dir != "" {
 		s.replayJournal(filepath.Join(dir, "memory.jsonl"))
 	}
@@ -65,7 +89,7 @@ func (s *MemoryStore) Save(_ context.Context, e Entry) error {
 	}
 
 	s.mu.Lock()
-	s.entries[e.UserKey] = append(s.entries[e.UserKey], e)
+	s.entries[e.UserKey] = s.pruneLocked(append(s.entries[e.UserKey], e))
 	s.mu.Unlock()
 
 	s.appendJournal(e)
@@ -74,8 +98,9 @@ func (s *MemoryStore) Save(_ context.Context, e Entry) error {
 
 func (s *MemoryStore) Recent(_ context.Context, userKey string, n int) ([]Entry, error) {
 	s.mu.Lock()
-	all := make([]Entry, len(s.entries[userKey]))
-	copy(all, s.entries[userKey])
+	all := s.pruneLocked(s.entries[userKey])
+	s.entries[userKey] = all
+	all = append([]Entry(nil), all...)
 	s.mu.Unlock()
 
 	// Sort descending by CreatedAt.
@@ -103,9 +128,28 @@ func (s *MemoryStore) Recent(_ context.Context, userKey string, n int) ([]Entry,
 func (s *MemoryStore) All(_ context.Context, userKey string) ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cp := make([]Entry, len(s.entries[userKey]))
-	copy(cp, s.entries[userKey])
-	return cp, nil
+	all := s.pruneLocked(s.entries[userKey])
+	s.entries[userKey] = all
+	return append([]Entry(nil), all...), nil
+}
+
+// pruneLocked drops expired entries and trims to maxPerUser (oldest first).
+// Callers must hold s.mu.
+func (s *MemoryStore) pruneLocked(entries []Entry) []Entry {
+	if s.ttl > 0 {
+		now := time.Now()
+		live := entries[:0:0]
+		for _, e := range entries {
+			if now.Sub(e.CreatedAt) <= s.ttl {
+				live = append(live, e)
+			}
+		}
+		entries = live
+	}
+	if s.maxPerUser > 0 && len(entries) > s.maxPerUser {
+		entries = entries[len(entries)-s.maxPerUser:]
+	}
+	return entries
 }
 
 // Close flushes and closes the journal file.
@@ -126,21 +170,37 @@ func (s *MemoryStore) replayJournal(path string) {
 		}
 		return
 	}
-	defer f.Close()
 
-	var loaded int
+	var total, loaded int
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 4<<20), 4<<20)
 	for scanner.Scan() {
+		total++
 		var e Entry
 		if json.Unmarshal(scanner.Bytes(), &e) != nil {
 			continue
 		}
+		if s.ttl > 0 && time.Since(e.CreatedAt) > s.ttl {
+			continue // expired — compaction below will drop it from disk too
+		}
 		s.entries[e.UserKey] = append(s.entries[e.UserKey], e)
 		loaded++
 	}
+	f.Close()
+
+	// Apply the per-user cap now that every line has been read, so
+	// compaction below writes back only what Save would have kept anyway.
+	var live []Entry
+	for userKey, entries := range s.entries {
+		s.entries[userKey] = s.pruneLocked(entries)
+		live = append(live, s.entries[userKey]...)
+	}
 	if loaded > 0 {
-		slog.Info("memory: replayed journal", "entries", loaded, "path", path)
+		slog.Info("memory: replayed journal", "entries", len(live), "path", path)
+	}
+
+	if len(live) < total {
+		s.compactJournal(path, live)
 	}
 
 	af, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -149,6 +209,36 @@ func (s *MemoryStore) replayJournal(path string) {
 		return
 	}
 	s.file = af
+}
+
+// compactJournal rewrites path with only live entries. Writes to a temp file
+// first and renames atomically — a crash mid-write leaves the original intact.
+func (s *MemoryStore) compactJournal(path string, entries []Entry) {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return
+	}
+	w := bufio.NewWriter(f)
+	for _, e := range entries {
+		line, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		_, _ = w.Write(line)
+		_ = w.WriteByte('\n')
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return
+	}
+	f.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return
+	}
+	slog.Info("memory: compacted journal", "kept", len(entries), "path", path)
 }
 
 func (s *MemoryStore) appendJournal(e Entry) {

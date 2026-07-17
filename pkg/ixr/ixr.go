@@ -122,7 +122,11 @@ func Start(opts ...Option) error {
 	router := buildRouter(registry)
 
 	// --- User memory store (optional) ---
-	memoryStore := memory.NewMemoryStore(os.Getenv("IXR_MEMORY_DIR"))
+	// Bounded by default (1h TTL, 50 entries/user) rather than accumulating
+	// forever — see internal/domain/memory.defaultMemoryTTL for why.
+	memoryTTL := time.Duration(envInt("IXR_MEMORY_TTL_SEC", 3600)) * time.Second
+	memoryMaxPerUser := envInt("IXR_MEMORY_MAX_PER_USER", 50)
+	memoryStore := memory.NewMemoryStoreWithLimits(os.Getenv("IXR_MEMORY_DIR"), memoryTTL, memoryMaxPerUser)
 	defer memoryStore.Close()
 
 	// --- Event bus + plugins ---
