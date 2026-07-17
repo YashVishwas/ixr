@@ -44,7 +44,6 @@ import (
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
-	pkgguardrail "github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
@@ -52,6 +51,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/session"
 	"github.com/YashVishwas/ixr/internal/ingress"
 	"github.com/YashVishwas/ixr/internal/observability"
+	pkgguardrail "github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/prometheus/client_golang/prometheus"
 )

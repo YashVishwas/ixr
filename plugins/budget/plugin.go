@@ -117,11 +117,7 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 		return nil
 	}
 
-	// CallEvent carries TenantID but not TeamID/UserID — accumulate at tenant scope.
-	// When a TeamID or UserID is available (future: add to CallEvent), all scopes
-	// will be incremented. For now we accumulate at the tenant level which is
-	// sufficient for the gate since Intercept checks the same keys.
-	scopes := []string{ev.TenantID}
+	scopes := scopeKeys(schema.Identity{TenantID: ev.TenantID, TeamID: ev.TeamID, UserID: ev.UserID})
 
 	for _, scope := range scopes {
 		lim, hasLimit := p.limits[scope]
@@ -250,4 +246,3 @@ func (p *Plugin) Close() error {
 	}
 	return nil
 }
-

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/pkg/plugin"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -199,6 +200,67 @@ func TestChatHandler_UseCaseHeader(t *testing.T) {
 	ev := <-published
 	if ev.UseCaseID != "test-case-42" {
 		t.Errorf("use_case_id: got %q, want test-case-42", ev.UseCaseID)
+	}
+}
+
+func TestChatHandler_ComputesCostAndPropagatesIdentity(t *testing.T) {
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	p := &stubProvider{
+		name: "anthropic",
+		resp: &schema.ResponseEnvelope{
+			ID:      "r1",
+			Model:   "claude-sonnet-4-6",
+			Choices: []schema.Choice{{}},
+			Usage:   schema.Usage{PromptTokens: 1_000_000, CompletionTokens: 1_000_000, TotalTokens: 2_000_000},
+		},
+	}
+	h := NewChatHandler(fixedRouter(p), fakeBus)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	id := schema.Identity{TenantID: "acme", TeamID: "eng", UserID: "alice"}
+	req = req.WithContext(identity.WithIdentity(req.Context(), id))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	ev := readEvent(t, published)
+	if ev.TenantID != "acme" || ev.TeamID != "eng" || ev.UserID != "alice" {
+		t.Fatalf("identity not propagated: got tenant=%q team=%q user=%q", ev.TenantID, ev.TeamID, ev.UserID)
+	}
+	if ev.Cost.TotalUSD != 18 {
+		t.Fatalf("cost not computed: got %+v, want total=18 (1M in @ $3/1M + 1M out @ $15/1M)", ev.Cost)
+	}
+}
+
+func TestChatHandler_UnpricedModelYieldsZeroCost(t *testing.T) {
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	p := &stubProvider{
+		name: "test",
+		resp: &schema.ResponseEnvelope{
+			ID:      "r1",
+			Choices: []schema.Choice{{}},
+			Usage:   schema.Usage{PromptTokens: 100, CompletionTokens: 100},
+		},
+	}
+	h := NewChatHandler(fixedRouter(p), fakeBus)
+	w := post(h, `{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+
+	ev := readEvent(t, published)
+	if ev.Cost.TotalUSD != 0 {
+		t.Fatalf("expected zero cost for uncatalogued model, got %+v", ev.Cost)
 	}
 }
 

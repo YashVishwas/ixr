@@ -20,6 +20,13 @@ func makeEvent(tenantID string, costUSD float64) *schema.CallEvent {
 	}
 }
 
+func makeEventFull(tenantID, teamID, userID string, costUSD float64) *schema.CallEvent {
+	ev := makeEvent(tenantID, costUSD)
+	ev.TeamID = teamID
+	ev.UserID = userID
+	return ev
+}
+
 func ctxWith(tenantID, teamID, userID string) context.Context {
 	return identity.WithIdentity(context.Background(), schema.Identity{
 		TenantID: tenantID,
@@ -64,6 +71,36 @@ func TestAccumulate_ShadowCallsNotCounted(t *testing.T) {
 	_ = p.OnEvent(context.Background(), ev)
 	if got := p.Spent("acme"); got != 0 {
 		t.Fatalf("shadow call should not count, got %f", got)
+	}
+}
+
+func TestAccumulate_SingleCallUpdatesAllHierarchyScopes(t *testing.T) {
+	// A single event from a user in a team should bump the user, team, and
+	// tenant scopes together — the point of "hierarchical" enforcement.
+	p := New(nil, nil, "")
+	_ = p.OnEvent(context.Background(), makeEventFull("acme", "eng", "alice", 0.05))
+
+	if got := p.Spent("acme:eng:alice"); got != 0.05 {
+		t.Errorf("user scope: got %f, want 0.05", got)
+	}
+	if got := p.Spent("acme:eng"); got != 0.05 {
+		t.Errorf("team scope: got %f, want 0.05", got)
+	}
+	if got := p.Spent("acme"); got != 0.05 {
+		t.Errorf("tenant scope: got %f, want 0.05", got)
+	}
+}
+
+func TestAccumulate_RealEventBlocksSubsequentTeamRequest(t *testing.T) {
+	// End-to-end: accumulate from real CallEvents (not manual p.spent pokes),
+	// then confirm Intercept actually blocks once the team ceiling is hit.
+	limits := map[string]Limit{"acme:eng": {LimitUSD: 0.05}}
+	p := New(limits, nil, "")
+	_ = p.OnEvent(context.Background(), makeEventFull("acme", "eng", "alice", 0.05))
+
+	err := p.Intercept(ctxWith("acme", "eng", "alice"), &schema.RequestEnvelope{})
+	if err == nil {
+		t.Fatal("expected block: team spend reached from real event accumulation")
 	}
 }
 

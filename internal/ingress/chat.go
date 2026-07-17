@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	"github.com/YashVishwas/ixr/internal/domain/cost"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/reasoning"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
@@ -130,6 +131,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Request:   req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
 			TenantID:  id.TenantID,
+			TeamID:    id.TeamID,
+			UserID:    id.UserID,
 		}
 		if err != nil {
 			ev.Error = err.Error()
@@ -138,6 +141,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ev.TokensIn = resp.Usage.PromptTokens
 			ev.TokensOut = resp.Usage.CompletionTokens
 			ev.Response = *resp
+			ev.Cost = cost.ForUsage(req.Model, ev.TokensIn, ev.TokensOut)
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error", "err", pubErr)
@@ -201,12 +205,16 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 			Request:   *req,
 			UseCaseID: r.Header.Get("X-IXR-UseCase"),
 			TenantID:  id.TenantID,
+			TeamID:    id.TeamID,
+			UserID:    id.UserID,
 			TokensIn:  totalIn,
 			TokensOut: totalOut,
 			Streaming: true,
 		}
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
+		} else {
+			ev.Cost = cost.ForUsage(req.Model, totalIn, totalOut)
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error (stream)", "err", pubErr)
@@ -235,6 +243,8 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		Model:     shadowModel,
 		UseCaseID: r.Header.Get("X-IXR-UseCase"),
 		TenantID:  id.TenantID,
+		TeamID:    id.TeamID,
+		UserID:    id.UserID,
 		Request:   shadowReq,
 		Shadow:    meta,
 	}
@@ -257,6 +267,7 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		ev.TokensIn = resp.Usage.PromptTokens
 		ev.TokensOut = resp.Usage.CompletionTokens
 		ev.Response = *resp
+		ev.Cost = cost.ForUsage(shadowModel, ev.TokensIn, ev.TokensOut)
 	}
 	_ = h.bus.Publish(ctx, ev)
 }
