@@ -328,7 +328,7 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 	}
 	ev.Provider = sp.Name()
 
-	resp, err := sp.Chat(ctx, &shadowReq)
+	resp, err := sp.Chat(ctx, reasoning.AdjustTokenBudget(&shadowReq))
 	ev.Latency = schema.EventLatency(time.Since(start))
 	if err != nil {
 		ev.Error = err.Error()

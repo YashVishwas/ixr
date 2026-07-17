@@ -353,6 +353,52 @@ func TestChatHandler_UnpricedModelYieldsZeroCost(t *testing.T) {
 	}
 }
 
+func TestChatHandler_ShadowRoutingAppliesReasoningTokenBudget(t *testing.T) {
+	// Regression: runShadow used to send the shadow model the caller's
+	// unadjusted max_tokens, so a reasoning shadow model (which burns most
+	// of max_tokens on invisible chain-of-thought) would return a truncated
+	// response, invalidating the primary-vs-shadow comparison.
+	published := make(chan *schema.CallEvent, 2)
+	fakeBus := &captureBus{ch: published}
+	shadowReq := make(chan *schema.RequestEnvelope, 1)
+
+	router := Router(func(model string) (provider.Provider, error) {
+		switch model {
+		case "gpt-4o":
+			return &stubProvider{
+				name: "primary",
+				resp: &schema.ResponseEnvelope{ID: "primary-resp", Model: model, Choices: []schema.Choice{{}}},
+			}, nil
+		case "o3":
+			return &stubProvider{
+				name: "shadow",
+				chat: func(_ context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+					shadowReq <- req
+					return &schema.ResponseEnvelope{ID: "shadow-resp", Model: req.Model, Choices: []schema.Choice{{}}}, nil
+				},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unknown model %s", model)
+		}
+	})
+
+	h := NewChatHandler(router, fakeBus)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","max_tokens":1000,"messages":[{"role":"user","content":"hello"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerShadowModel, "o3")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	gotReq := readRequest(t, shadowReq)
+	if gotReq.MaxTokens <= 1000 {
+		t.Fatalf("shadow request to a reasoning model should have a scaled-up max_tokens, got %d", gotReq.MaxTokens)
+	}
+}
+
 func TestChatHandler_ShadowRoutingPublishesShadowEvent(t *testing.T) {
 	published := make(chan *schema.CallEvent, 2)
 	fakeBus := &captureBus{ch: published}

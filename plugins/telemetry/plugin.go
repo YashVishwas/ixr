@@ -63,6 +63,10 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 		FinishReason:  finishReason,
 		Timestamp:     ev.Timestamp,
 	}
+	if ev.Shadow != nil {
+		rec.Shadow = true
+		rec.ShadowOf = ev.Shadow.PrimaryModel
+	}
 
 	// Update the performance store with each call's outcome.
 	stats := store.ModelStats{

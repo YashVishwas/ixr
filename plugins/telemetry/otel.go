@@ -102,6 +102,15 @@ func genAIAttributes(rec schema.TelemetryRecord) []attribute.KeyValue {
 			attrs = append(attrs, attribute.String("ixr.fallback_from", rec.FallbackFrom))
 		}
 	}
+	if rec.Shadow {
+		// Marks spans from shadow-routed calls so OTLP backends can filter
+		// them out of primary-traffic dashboards instead of double-counting
+		// tokens/cost against the real request volume.
+		attrs = append(attrs, attribute.Bool("ixr.shadow", true))
+		if rec.ShadowOf != "" {
+			attrs = append(attrs, attribute.String("ixr.shadow_of", rec.ShadowOf))
+		}
+	}
 
 	return attrs
 }
