@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Hierarchical budget enforcement plugin: spend accumulates and is gated at
+  org → team → user scope (`tenantID[:teamID[:userID]]`), configured via
+  `tenants.<id>.quotas` / `tenants.<id>.teams.<id>.quotas` in `ixr.yaml`
+  (`plugins/budget`, `pkg/guardrail`)
+- `internal/domain/cost.ForUsage` prices a call against the routing catalog
+  and populates `CallEvent.Cost` on every request path (previously always
+  zero, so budget enforcement never actually triggered against live traffic)
+- `CallEvent` gains `TeamID`/`UserID` fields (from identity context) so spend
+  can be attributed below the tenant level
+
 ## [0.2.0] - 2026-06-05
 
 ### Added
