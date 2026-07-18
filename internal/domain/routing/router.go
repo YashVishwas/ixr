@@ -170,56 +170,18 @@ var catalog = []ModelCard{
 }
 
 // knownContextWindows covers widely-used models not in the routing catalog.
-var knownContextWindows = map[string]int{
-	"gpt-4o":                     128_000,
-	"gpt-4o-mini":                128_000,
-	"gpt-4-turbo":                128_000,
-	"gpt-4":                      8_192,
-	"gpt-3.5-turbo":              16_385,
-	"o1":                         200_000,
-	"o1-mini":                    128_000,
-	"o3":                         200_000,
-	"o3-mini":                    200_000,
-	"claude-3-5-sonnet-20241022": 200_000,
-	"claude-3-5-haiku-20241022":  200_000,
-	"claude-3-opus-20240229":     200_000,
-	"claude-opus-4-5":            200_000,
-	"claude-sonnet-4-5":          200_000,
-	"claude-haiku-4-5":           200_000,
-	"gemini-1.5-pro":             1_000_000,
-	"gemini-1.5-flash":           1_000_000,
-	"gemini-2.0-flash":           1_000_000,
-	"llama-4-maverick":           1_000_000,
-	"mistral-large-latest":       128_000,
-	"mistral-small-latest":       128_000,
-	"deepseek-chat":              64_000,
-	"deepseek-coder":             128_000,
-}
-
-const defaultContextWindow = 128_000
-
-		Reasoning:    0.68,
-		Coding:       0.62,
-		Math:         0.70,
-		Multilingual: 0.72,
-
-		ContextWindow: 128_000,
-	},
-}
-
-// knownContextWindows covers widely-used models not in the routing catalog.
 // Used by ContextWindowFor as a secondary lookup before falling back to the default.
 var knownContextWindows = map[string]int{
 	// OpenAI
-	"gpt-4o":                128_000,
-	"gpt-4o-mini":           128_000,
-	"gpt-4-turbo":           128_000,
-	"gpt-4":                 8_192,
-	"gpt-3.5-turbo":         16_385,
-	"o1":                    200_000,
-	"o1-mini":               128_000,
-	"o3":                    200_000,
-	"o3-mini":               200_000,
+	"gpt-4o":        128_000,
+	"gpt-4o-mini":   128_000,
+	"gpt-4-turbo":   128_000,
+	"gpt-4":         8_192,
+	"gpt-3.5-turbo": 16_385,
+	"o1":            200_000,
+	"o1-mini":       128_000,
+	"o3":            200_000,
+	"o3-mini":       200_000,
 	// Anthropic
 	"claude-3-5-sonnet-20241022": 200_000,
 	"claude-3-5-haiku-20241022":  200_000,
