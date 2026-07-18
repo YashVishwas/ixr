@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `internal/domain/routing/router.go` failed to compile — `knownContextWindows`
+  and `defaultContextWindow` were each declared twice, with a stray
+  struct-literal fragment sitting outside any struct in between, from an
+  earlier PR merge that silently interleaved two branches which both added
+  the same `ContextWindow` infrastructure independently
+
 ## [0.2.0] - 2026-06-05
 
 ### Added
