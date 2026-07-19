@@ -240,6 +240,8 @@ func (s *MemoryStore) Close() error {
 		close(s.stopCompact)
 		<-s.compactDone
 	}
+	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
 	if s.file != nil {
 		return s.file.Close()
 	}
@@ -328,14 +330,17 @@ func (s *MemoryStore) compactJournal(path string, entries []Entry) {
 }
 
 func (s *MemoryStore) appendJournal(e Entry) {
-	if s.file == nil {
-		return
-	}
 	line, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
 	s.fileMu.Lock()
+	defer s.fileMu.Unlock()
+	// s.file can be nil (no persistence configured) or swapped out from under
+	// us mid-write by compactNow's close/reopen — the nil check must happen
+	// under the same lock compactNow uses to mutate it, not before acquiring it.
+	if s.file == nil {
+		return
+	}
 	_, _ = s.file.Write(append(line, '\n'))
-	s.fileMu.Unlock()
 }
