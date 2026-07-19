@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Published `schema/ixr.proto` (Protocol Buffers v3) and `schema/ixr.schema.json`
+  (JSON Schema draft 2020-12) covering `CallEvent`, `RequestEnvelope`,
+  `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
+  generate typed bindings or validate payloads without reverse-engineering
+  the event stream (`schema/README.md`)
+
+### Fixed
+- `internal/domain/routing/router.go` failed to compile — `knownContextWindows`
+  and `defaultContextWindow` were each declared twice, with a stray
+  struct-literal fragment sitting outside any struct in between, from an
+  earlier PR merge that silently interleaved two branches which both added
+  the same `ContextWindow` infrastructure independently
+
 ## [0.2.0] - 2026-06-05
 
 ### Added
