@@ -103,7 +103,6 @@ func Start(opts ...Option) error {
 
 	promReg := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(promReg)
-	_ = metrics // used via record() in handler (passed via context in future; wired at mux level for now)
 
 	// --- Stores ---
 	perfStore := modelperf.NewMemory()
@@ -171,6 +170,7 @@ func Start(opts ...Option) error {
 		ingress.WithEngine(scoringEngine),
 		ingress.WithCBRegistry(cbRegistry),
 		ingress.WithShadow(shadowOrch),
+		ingress.WithMetrics(metrics),
 	)
 
 	// --- Rate limiter ---

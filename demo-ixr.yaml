@@ -37,27 +37,6 @@ providers:
   zhipu:
     api_key: "${ZHIPU_API_KEY}"
 
-chains:
-  fast-refine:
-    models:
-      - llama-3.3-70b-versatile
-      - mistral-small-latest
-    prompts:
-      - ""
-      - "Improve the previous answer: fix any inaccuracies and make it more concise."
-  smart-qa:
-    models:
-      - llama-3.3-70b-versatile
-      - gpt-oss-120b
-    prompts:
-      - ""
-      - "Review the previous answer. Address any gaps, uncertainties, or errors. Provide a final, improved response."
-  debate:
-    models:
-      - llama-3.3-70b-versatile
-      - mistral-small-latest
-      - gpt-oss-120b
-    prompts:
-      - ""
-      - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
-      - "Synthesize the two perspectives above into the best possible answer."
+# Note: model chaining ("chains:" config, X-IXR-Chain header) exists only on
+# the unmerged feature/model-chain branch, not on main — don't reintroduce a
+# chains: block here until that lands, since it silently no-ops otherwise.
