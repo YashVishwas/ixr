@@ -81,6 +81,22 @@ var catalog = []ModelCard{
 		ContextWindow: 200_000,
 	},
 	{
+		ID: "claude-sonnet-4-6",
+
+		InputUSDPer1M:  3,
+		OutputUSDPer1M: 15,
+
+		LatencySec:  1.1,
+		FailureRate: 0.02,
+
+		Reasoning:    0.92,
+		Coding:       0.91,
+		Math:         0.90,
+		Multilingual: 0.85,
+
+		ContextWindow: 200_000,
+	},
+	{
 		ID:             "gpt-5.2",
 		InputUSDPer1M:  1.5,
 		OutputUSDPer1M: 14,
@@ -302,6 +318,17 @@ func Catalog() []ModelCard {
 	out := make([]ModelCard, len(catalog))
 	copy(out, catalog)
 	return out
+}
+
+// Lookup returns the ModelCard for the given model ID, or false if the
+// model has no pricing entry in the catalog.
+func Lookup(model string) (ModelCard, bool) {
+	for _, m := range catalog {
+		if m.ID == model {
+			return m, true
+		}
+	}
+	return ModelCard{}, false
 }
 
 // InputShare converts a prompt character count to the estimated fraction of tokens

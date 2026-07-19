@@ -9,8 +9,10 @@ import "time"
 type CallEvent struct {
 	ID        string           `json:"id"`
 	Timestamp time.Time        `json:"timestamp"`
-	UseCaseID string           `json:"use_case_id"` // from X-IXR-UseCase header
-	TenantID  string           `json:"tenant_id"`   // from identity context
+	UseCaseID string           `json:"use_case_id"`       // from X-IXR-UseCase header
+	TenantID  string           `json:"tenant_id"`         // from identity context
+	TeamID    string           `json:"team_id,omitempty"` // from identity context
+	UserID    string           `json:"user_id,omitempty"` // from identity context
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
 	Latency   time.Duration    `json:"latency_ms"`
@@ -40,17 +42,17 @@ type DeltaChunk struct {
 
 // RequestEnvelope is ixr's canonical representation of an inbound chat request.
 type RequestEnvelope struct {
-	Model       string  `json:"model"`
+	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
-	Stream      bool    `json:"stream,omitempty"`
-	Tools       []Tool  `json:"tools,omitempty"`
-	ToolChoice  any     `json:"tool_choice,omitempty"` // string | ToolChoiceObject
-	Temperature float64 `json:"temperature,omitempty"`
-	MaxTokens   int     `json:"max_tokens,omitempty"`
-	TopP        float64 `json:"top_p,omitempty"`
-	N           int     `json:"n,omitempty"`
-	Stop        any     `json:"stop,omitempty"` // string | []string
-	User        string  `json:"user,omitempty"`
+	Stream      bool      `json:"stream,omitempty"`
+	Tools       []Tool    `json:"tools,omitempty"`
+	ToolChoice  any       `json:"tool_choice,omitempty"` // string | ToolChoiceObject
+	Temperature float64   `json:"temperature,omitempty"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	TopP        float64   `json:"top_p,omitempty"`
+	N           int       `json:"n,omitempty"`
+	Stop        any       `json:"stop,omitempty"` // string | []string
+	User        string    `json:"user,omitempty"`
 }
 
 // ResponseEnvelope is ixr's canonical representation of a chat response,

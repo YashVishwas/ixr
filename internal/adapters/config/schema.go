@@ -70,6 +70,13 @@ type TenantConfig struct {
 	Providers   map[string]ProviderConfig `yaml:"providers"`
 	RateLimit   RateLimitConfig           `yaml:"rate_limit"`
 	Quotas      QuotaConfig               `yaml:"quotas"`
+	// Teams maps team identifiers to per-team quota overrides within this tenant.
+	Teams map[string]TeamConfig `yaml:"teams,omitempty"`
+}
+
+// TeamConfig holds per-team spend limits within a tenant.
+type TeamConfig struct {
+	Quotas QuotaConfig `yaml:"quotas"`
 }
 
 // QuotaConfig defines hard caps for a tenant.
