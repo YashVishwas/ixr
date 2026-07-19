@@ -8,15 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Hierarchical budget enforcement plugin: spend accumulates and is gated at
-  org → team → user scope (`tenantID[:teamID[:userID]]`), configured via
-  `tenants.<id>.quotas` / `tenants.<id>.teams.<id>.quotas` in `ixr.yaml`
-  (`plugins/budget`, `pkg/guardrail`)
-- `internal/domain/cost.ForUsage` prices a call against the routing catalog
-  and populates `CallEvent.Cost` on every request path (previously always
-  zero, so budget enforcement never actually triggered against live traffic)
-- `CallEvent` gains `TeamID`/`UserID` fields (from identity context) so spend
-  can be attributed below the tenant level
+- Published `schema/ixr.proto` (Protocol Buffers v3) and `schema/ixr.schema.json`
+  (JSON Schema draft 2020-12) covering `CallEvent`, `RequestEnvelope`,
+  `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
+  generate typed bindings or validate payloads without reverse-engineering
+  the event stream (`schema/README.md`)
+
+### Fixed
+- `internal/domain/routing/router.go` failed to compile — `knownContextWindows`
+  and `defaultContextWindow` were each declared twice, with a stray
+  struct-literal fragment sitting outside any struct in between, from an
+  earlier PR merge that silently interleaved two branches which both added
+  the same `ContextWindow` infrastructure independently
 
 ## [0.2.0] - 2026-06-05
 

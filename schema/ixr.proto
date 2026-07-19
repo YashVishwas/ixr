@@ -1,0 +1,196 @@
+// ixr schema — Protocol Buffer definitions for the ixr event bus and API types.
+// Version: v1
+//
+// Go is the source of truth (pkg/schema/). This file is a derived artifact
+// kept in sync with the Go types. Do NOT add runtime proto dependencies to the
+// ixr binary — this file is for consumer language SDK generation only.
+//
+// Usage (Python):
+//   pip install grpcio-tools
+//   python -m grpc_tools.protoc -I. --python_out=. schema/ixr.proto
+//
+// Usage (TypeScript):
+//   npm install -g ts-proto
+//   protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=. schema/ixr.proto
+//
+// Usage (Rust):
+//   use prost-build in build.rs
+
+syntax = "proto3";
+package ixr.v1;
+option go_package = "github.com/YashVishwas/ixr/pkg/schema;schema";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core request / response types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Message is a single turn in a conversation.
+message Message {
+  string role    = 1; // "user" | "assistant" | "system" | "tool"
+  string content = 2;
+  repeated ToolCall tool_calls = 3;
+}
+
+// Tool describes a callable function the model may invoke.
+message Tool {
+  string      type     = 1; // always "function"
+  FunctionDef function = 2;
+}
+
+// FunctionDef is the schema for a callable function.
+message FunctionDef {
+  string name        = 1;
+  string description = 2;
+  // parameters is a JSON Schema object serialized as a Struct.
+  google.protobuf.Struct parameters = 3;
+  bool   strict      = 4;
+}
+
+// ToolCall is a single tool invocation requested by the model.
+message ToolCall {
+  string       id       = 1;
+  string       type     = 2; // "function"
+  ToolFunction function = 3;
+}
+
+// ToolFunction holds the name and JSON-encoded arguments for a tool call.
+message ToolFunction {
+  string name      = 1;
+  string arguments = 2; // JSON-encoded string
+}
+
+// RequestEnvelope is ixr's canonical inbound chat request.
+// Mirrors the OpenAI /v1/chat/completions request body.
+message RequestEnvelope {
+  string            model       = 1;
+  repeated Message  messages    = 2;
+  bool              stream      = 3;
+  repeated Tool     tools       = 4;
+  // tool_choice: "none" | "auto" | "required" | {"type":"function","function":{"name":"..."}}
+  google.protobuf.Value tool_choice = 5;
+  double            temperature = 6;
+  int32             max_tokens  = 7;
+  double            top_p       = 8;
+  int32             n           = 9;
+  // stop: string | []string
+  google.protobuf.Value stop    = 10;
+  string            user        = 11;
+}
+
+// Choice is one completion candidate in a response.
+message Choice {
+  int32   index         = 1;
+  Message message       = 2;
+  string  finish_reason = 3;
+}
+
+// Usage reports token consumption for a call.
+message Usage {
+  int32 prompt_tokens     = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens      = 3;
+}
+
+// ResponseEnvelope is ixr's canonical chat response.
+// Shaped to match the OpenAI response format.
+message ResponseEnvelope {
+  string           id      = 1;
+  string           object  = 2;
+  int64            created = 3; // Unix timestamp
+  string           model   = 4;
+  repeated Choice  choices = 5;
+  Usage            usage   = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cost
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CostBreakdown holds the USD cost components for a single LLM call.
+message CostBreakdown {
+  double input_usd  = 1;
+  double output_usd = 2;
+  double total_usd  = 3;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Identity
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Identity carries the caller's tenant, team, user, and use-case context.
+// The hierarchy for budget enforcement is: tenant (org) → team → user.
+message Identity {
+  string tenant_id  = 1;
+  string team_id    = 2;
+  string user_id    = 3;
+  string use_case_id = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event bus — CallEvent
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ShadowMetadata is attached to CallEvents emitted for shadow-routed requests.
+message ShadowMetadata {
+  string primary_id    = 1;
+  string primary_model = 2;
+  string shadow_model  = 3;
+}
+
+// CallEvent is emitted on the ixr event bus for every LLM call.
+// It is the primary unit of data that plugins and downstream systems consume.
+// Plugins receive this via the EventConsumer.OnEvent callback.
+//
+// JSON equivalent is emitted by the audit-log plugin (one line per call).
+message CallEvent {
+  string                    id         = 1;
+  google.protobuf.Timestamp timestamp  = 2;
+  string                    use_case_id = 3;
+  string                    tenant_id  = 4;
+  string                    provider   = 5;
+  string                    model      = 6;
+  // latency_ms is the provider round-trip time in milliseconds.
+  int64                     latency_ms = 7;
+  int32                     tokens_in  = 8;
+  int32                     tokens_out = 9;
+  CostBreakdown             cost       = 10;
+  RequestEnvelope           request    = 11;
+  ResponseEnvelope          response   = 12;
+  // error is non-empty when the provider call failed.
+  string                    error      = 13;
+  bool                      streaming  = 14;
+  ShadowMetadata            shadow     = 15;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Telemetry
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TelemetryRecord is written by the telemetry plugin for every call.
+// It carries routing metadata beyond what CallEvent holds and is what
+// scoring engines and observability systems should consume.
+message TelemetryRecord {
+  string                    request_id    = 1;
+  string                    use_case_id   = 2;
+  string                    tenant_id     = 3;
+  string                    intent        = 4;
+  string                    model         = 5;
+  string                    response_model = 6; // actual model returned (may differ)
+  string                    provider      = 7;
+  int32                     latency_ms    = 8;
+  int32                     tokens_in     = 9;
+  int32                     tokens_out    = 10;
+  int32                     max_tokens    = 11;
+  double                    cost_usd      = 12;
+  bool                      success       = 13;
+  string                    error_message = 14;
+  string                    finish_reason = 15;
+  bool                      fallback_used = 16;
+  string                    fallback_from = 17;
+  bool                      shadow        = 18;
+  string                    shadow_of     = 19;
+  google.protobuf.Timestamp timestamp     = 20;
+}

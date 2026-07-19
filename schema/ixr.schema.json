@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/YashVishwas/ixr/schema/ixr.schema.json",
+  "title": "ixr Schema v1",
+  "description": "JSON Schema definitions for ixr event bus and API types. Go (pkg/schema/) is the source of truth; this file is a derived artifact.",
+  "$defs": {
+
+    "Message": {
+      "type": "object",
+      "description": "A single turn in a conversation.",
+      "required": ["role"],
+      "properties": {
+        "role":       { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
+        "content":    { "type": "string" },
+        "tool_calls": { "type": "array", "items": { "$ref": "#/$defs/ToolCall" } }
+      }
+    },
+
+    "ToolCall": {
+      "type": "object",
+      "description": "A single tool invocation requested by the model.",
+      "required": ["id", "type", "function"],
+      "properties": {
+        "id":       { "type": "string" },
+        "type":     { "type": "string", "enum": ["function"] },
+        "function": { "$ref": "#/$defs/ToolFunction" }
+      }
+    },
+
+    "ToolFunction": {
+      "type": "object",
+      "required": ["name", "arguments"],
+      "properties": {
+        "name":      { "type": "string" },
+        "arguments": { "type": "string", "description": "JSON-encoded string of the function arguments." }
+      }
+    },
+
+    "Tool": {
+      "type": "object",
+      "description": "A callable function the model may invoke.",
+      "required": ["type", "function"],
+      "properties": {
+        "type":     { "type": "string", "enum": ["function"] },
+        "function": { "$ref": "#/$defs/FunctionDef" }
+      }
+    },
+
+    "FunctionDef": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name":        { "type": "string" },
+        "description": { "type": "string" },
+        "parameters":  { "type": "object", "description": "JSON Schema object describing the function parameters." },
+        "strict":      { "type": "boolean" }
+      }
+    },
+
+    "RequestEnvelope": {
+      "type": "object",
+      "description": "ixr's canonical inbound chat request. Mirrors the OpenAI /v1/chat/completions request body.",
+      "required": ["model", "messages"],
+      "properties": {
+        "model":       { "type": "string" },
+        "messages":    { "type": "array", "items": { "$ref": "#/$defs/Message" }, "minItems": 1 },
+        "stream":      { "type": "boolean", "default": false },
+        "tools":       { "type": "array", "items": { "$ref": "#/$defs/Tool" } },
+        "tool_choice": {
+          "oneOf": [
+            { "type": "string", "enum": ["none", "auto", "required"] },
+            { "$ref": "#/$defs/ToolChoiceObject" }
+          ]
+        },
+        "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+        "max_tokens":  { "type": "integer", "minimum": 1 },
+        "top_p":       { "type": "number", "minimum": 0, "maximum": 1 },
+        "n":           { "type": "integer", "minimum": 1 },
+        "stop": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" }, "maxItems": 4 }
+          ]
+        },
+        "user": { "type": "string" }
+      }
+    },
+
+    "ToolChoiceObject": {
+      "type": "object",
+      "required": ["type", "function"],
+      "properties": {
+        "type":     { "type": "string", "enum": ["function"] },
+        "function": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "Choice": {
+      "type": "object",
+      "required": ["index", "message", "finish_reason"],
+      "properties": {
+        "index":         { "type": "integer" },
+        "message":       { "$ref": "#/$defs/Message" },
+        "finish_reason": { "type": "string", "enum": ["stop", "length", "tool_calls", "content_filter", "null"] }
+      }
+    },
+
+    "Usage": {
+      "type": "object",
+      "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+      "properties": {
+        "prompt_tokens":     { "type": "integer" },
+        "completion_tokens": { "type": "integer" },
+        "total_tokens":      { "type": "integer" }
+      }
+    },
+
+    "ResponseEnvelope": {
+      "type": "object",
+      "description": "ixr's canonical chat response. Shaped to match the OpenAI response format.",
+      "required": ["id", "object", "created", "model", "choices", "usage"],
+      "properties": {
+        "id":      { "type": "string" },
+        "object":  { "type": "string", "enum": ["chat.completion"] },
+        "created": { "type": "integer", "description": "Unix timestamp (seconds)." },
+        "model":   { "type": "string" },
+        "choices": { "type": "array", "items": { "$ref": "#/$defs/Choice" } },
+        "usage":   { "$ref": "#/$defs/Usage" }
+      }
+    },
+
+    "CostBreakdown": {
+      "type": "object",
+      "description": "USD cost components for a single LLM call.",
+      "required": ["input_usd", "output_usd", "total_usd"],
+      "properties": {
+        "input_usd":  { "type": "number" },
+        "output_usd": { "type": "number" },
+        "total_usd":  { "type": "number" }
+      }
+    },
+
+    "Identity": {
+      "type": "object",
+      "description": "Caller's tenant, team, user, and use-case context.",
+      "required": ["tenant_id"],
+      "properties": {
+        "tenant_id":   { "type": "string" },
+        "team_id":     { "type": "string" },
+        "user_id":     { "type": "string" },
+        "use_case_id": { "type": "string" }
+      }
+    },
+
+    "ShadowMetadata": {
+      "type": "object",
+      "description": "Attached to CallEvents emitted for shadow-routed requests.",
+      "properties": {
+        "primary_id":    { "type": "string" },
+        "primary_model": { "type": "string" },
+        "shadow_model":  { "type": "string" }
+      }
+    },
+
+    "CallEvent": {
+      "type": "object",
+      "description": "Emitted on the ixr event bus for every LLM call. Primary unit of data for plugins and downstream systems.",
+      "required": ["id", "timestamp", "tenant_id", "provider", "model"],
+      "properties": {
+        "id":          { "type": "string" },
+        "timestamp":   { "type": "string", "format": "date-time" },
+        "use_case_id": { "type": "string" },
+        "tenant_id":   { "type": "string" },
+        "provider":    { "type": "string", "description": "Normalised provider name (openai, anthropic, vertex_ai, mistral_ai, ollama, deepseek)." },
+        "model":       { "type": "string" },
+        "latency_ms":  { "type": "integer", "description": "Provider round-trip in milliseconds." },
+        "tokens_in":   { "type": "integer" },
+        "tokens_out":  { "type": "integer" },
+        "cost":        { "$ref": "#/$defs/CostBreakdown" },
+        "request":     { "$ref": "#/$defs/RequestEnvelope" },
+        "response":    { "$ref": "#/$defs/ResponseEnvelope" },
+        "error":       { "type": "string", "description": "Non-empty when the provider call failed." },
+        "streaming":   { "type": "boolean" },
+        "shadow":      { "$ref": "#/$defs/ShadowMetadata" }
+      }
+    },
+
+    "TelemetryRecord": {
+      "type": "object",
+      "description": "Written by the telemetry plugin for every call. Carries routing metadata beyond CallEvent.",
+      "required": ["request_id", "tenant_id", "model", "provider", "timestamp"],
+      "properties": {
+        "request_id":     { "type": "string" },
+        "use_case_id":    { "type": "string" },
+        "tenant_id":      { "type": "string" },
+        "intent":         { "type": "string" },
+        "model":          { "type": "string" },
+        "response_model": { "type": "string", "description": "Actual model returned by provider (may differ from request model)." },
+        "provider":       { "type": "string" },
+        "latency_ms":     { "type": "integer" },
+        "tokens_in":      { "type": "integer" },
+        "tokens_out":     { "type": "integer" },
+        "max_tokens":     { "type": "integer" },
+        "cost_usd":       { "type": "number" },
+        "success":        { "type": "boolean" },
+        "error_message":  { "type": "string" },
+        "finish_reason":  { "type": "string" },
+        "fallback_used":  { "type": "boolean" },
+        "fallback_from":  { "type": "string" },
+        "shadow":         { "type": "boolean" },
+        "shadow_of":      { "type": "string" },
+        "timestamp":      { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
