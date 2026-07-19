@@ -20,6 +20,7 @@ import (
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
+	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
 	"github.com/YashVishwas/ixr/internal/adapters/bus"
@@ -45,6 +46,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
@@ -119,6 +121,16 @@ func Start(opts ...Option) error {
 	// --- Router (model name → provider) ---
 	router := buildRouter(registry)
 
+	// --- User memory store (optional) ---
+	// Bounded by default (1h TTL, 50 entries/user, journal recompacted every
+	// 15m) rather than accumulating forever — see
+	// internal/domain/memory.defaultMemoryTTL for why.
+	memoryTTL := time.Duration(envInt("IXR_MEMORY_TTL_SEC", 3600)) * time.Second
+	memoryMaxPerUser := envInt("IXR_MEMORY_MAX_PER_USER", 50)
+	memoryCompactInterval := time.Duration(envInt("IXR_MEMORY_COMPACT_INTERVAL_SEC", 900)) * time.Second
+	memoryStore := memory.NewMemoryStoreWithLimits(os.Getenv("IXR_MEMORY_DIR"), memoryTTL, memoryMaxPerUser, memoryCompactInterval)
+	defer memoryStore.Close()
+
 	// --- Event bus + plugins ---
 	memBus := bus.NewMemory(0)
 	mgr := pluginmgr.New(memBus)
@@ -134,6 +146,14 @@ func Start(opts ...Option) error {
 		}
 	}
 	mgr.Register(telemetry.New(perfStore, telemetrySink))
+
+	// Memory extraction: rule-based always on; LLM extractor added when
+	// IXR_MEMORY=true and IXR_MEMORY_EXTRACTOR=llm (future — LLMCaller wiring
+	// requires a provider reference; defaulting to rule-only for now).
+	if os.Getenv("IXR_MEMORY") == "true" {
+		ext := memory.RuleExtractor{}
+		mgr.Register(memoryplugin.New(memoryStore, ext))
+	}
 
 	// --- Adaptive routing ---
 	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
@@ -244,9 +264,14 @@ func Start(opts ...Option) error {
 		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
 	}
 
-	// Chat completions: auth → rate limit → interceptors → session → cache → chat
+	// Chat completions: auth → rate limit → interceptors → memory → session → cache → chat
+	// Memory sits outside session (per MemoryMiddleware's doc comment) so the
+	// memory system message is in place before session history is appended.
+	memTopK := envInt("IXR_MEMORY_TOP_K", 5)
 	chatChain := authMW.Handler(rateMW.Handler(
-		ingress.NewInterceptorMiddleware(interceptors, middleChain).WithBus(memBus),
+		ingress.NewInterceptorMiddleware(interceptors,
+			ingress.NewMemoryMiddleware(memoryStore, memTopK, middleChain),
+		).WithBus(memBus),
 	))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 

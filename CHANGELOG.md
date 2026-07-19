@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
   generate typed bindings or validate payloads without reverse-engineering
   the event stream (`schema/README.md`)
+- Hierarchical budget enforcement plugin: spend accumulates and is gated at
+  org → team → user scope (`tenantID[:teamID[:userID]]`), configured via
+  `tenants.<id>.quotas` / `tenants.<id>.teams.<id>.quotas` in `ixr.yaml`
+  (`plugins/budget`, `pkg/guardrail`)
+- `internal/domain/cost.ForUsage` prices a call against the routing catalog
+  and populates `CallEvent.Cost` on every request path (previously always
+  zero, so budget enforcement never actually triggered against live traffic)
+- `CallEvent` gains `TeamID`/`UserID` fields (from identity context) so spend
+  can be attributed below the tenant level
+- User memory: facts extracted from conversation turns (`RuleExtractor`,
+  regex-based) are stored per user (`tenantID:userID`) and injected as
+  context into new requests, gated on `IXR_MEMORY=true` and a concrete
+  `X-IXR-UserID` (`internal/domain/memory`, `plugins/memory`,
+  `internal/ingress/memory_middleware.go`)
+- Memory storage is bounded rather than growing forever: entries expire
+  after a TTL (`IXR_MEMORY_TTL_SEC`, default 1h) and are capped per user
+  (`IXR_MEMORY_MAX_PER_USER`, default 50); the on-disk journal is
+  recompacted on startup and periodically at runtime
+  (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
 - `internal/domain/routing/router.go` failed to compile — `knownContextWindows`
