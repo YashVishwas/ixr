@@ -402,6 +402,104 @@ SessionMiddleware
 
 ---
 
+### Gap 10 — Multimodal Input (Vision)
+
+**What it is:** `schema.Message` gains the ability to carry image content alongside — or instead of — text, so a caller sending a vision request (screenshot + question, document image + extraction prompt) through ixr gets it forwarded correctly instead of silently losing the image.
+
+**Why it matters:** `Message.Content` is a plain string today. Any caller sending OpenAI's or Anthropic's multi-part content shape (`"content": [{"type":"text",...},{"type":"image_url",...}]`) either fails JSON decoding or has the image silently dropped depending on how strictly the request is parsed. Vision-in-the-loop workflows (screenshot QA, document extraction, UI-testing agents) are now a mainstream usage pattern for exactly the kind of app ixr sits in front of — this is a hard blocker, not a nice-to-have, for that whole category of traffic.
+
+**Design sketch:**
+
+The core tension: OpenAI's wire format allows `"content"` to be *either* a bare string *or* an array of content-part objects — the same JSON key, two shapes. Changing `Message.Content`'s type outright would be a breaking change to every existing text-only integration. Following the same pattern used for tool-calling (Message gained `ToolCallID`/`Name` as additive fields, not a rewrite of `Content`), this adds a new field rather than repurposing the existing one:
+
+```go
+// pkg/schema/event.go
+type Message struct {
+    Role       string        `json:"role"`
+    Content    string        `json:"content,omitempty"`
+    Parts      []ContentPart `json:"-"` // populated by custom (Un)MarshalJSON when "content" arrives as an array
+    ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+    ToolCallID string        `json:"tool_call_id,omitempty"`
+    Name       string        `json:"name,omitempty"`
+}
+
+type ContentPart struct {
+    Type     string        `json:"type"` // "text" | "image_url"
+    Text     string        `json:"text,omitempty"`
+    ImageURL *ImageURLPart `json:"image_url,omitempty"`
+}
+
+type ImageURLPart struct {
+    URL    string `json:"url"`              // https:// or data: URI
+    Detail string `json:"detail,omitempty"` // "auto" | "low" | "high"
+}
+```
+
+`Message` needs a custom `UnmarshalJSON`/`MarshalJSON` pair to detect which shape `"content"` arrived as: a bare string decodes straight into `Content` (today's behaviour, unchanged); an array decodes into `Parts`, and `Content` is left empty unless the caller also wants a flattened-text fallback for adapters that don't support images (concatenate the `text` parts). Text-only callers see zero behavioural change — this is additive, matching the RFC's "unconfigured state equivalent to pre-feature state" constraint.
+
+Per-adapter translation (same shape of work as the tool-calling adapter changes):
+- **OpenAI / openaicompat** — wire format already matches `ContentPart` almost exactly; `wireMessage.Content` becomes polymorphic the same way, passed through close to as-is.
+- **Anthropic** — image content blocks are `{"type":"image","source":{"type":"base64","media_type":"...","data":"..."}}`. Anthropic requires base64, not a fetchable URL — a `data:` URI passes through directly (strip the `data:image/png;base64,` prefix into `media_type`+`data`); an `https://` URL requires ixr to fetch and base64-encode it server-side, or reject with a clear error naming the limitation. Scope v1 to `data:` URIs only and document the gap rather than adding an outbound HTTP fetch to the request path (violates the "untouchable latency budget" constraint without a fetch timeout of its own).
+- **Google AI (Gemini)** — images are `inlineData` parts (`{"inlineData":{"mimeType":...,"data":"..."}}`), following the same `genPart`-as-one-of pattern already established for `functionCall`/`functionResponse`.
+
+Scope for v1: OpenAI, Anthropic, and the openaicompat family (covers most configured providers at once). Bedrock, Ollama, and Google AI vision support are reasonable follow-ups but not blocking — the interface doesn't need every adapter to support it on day one, adapters that don't implement it simply don't populate `Parts` on the way out.
+
+---
+
+### Gap 11 — Model Chaining
+
+**What it is:** Sequential multi-model chaining — a request names a chain instead of a single model, and ixr runs a fixed sequence of models, each step's output feeding into the next step's prompt, returning the final step's response to the caller.
+
+**Why it matters:** This shipped as example config in `demo-ixr.yaml` (`fast-refine`, `smart-qa`, `debate` — draft-then-refine and multi-perspective synthesis patterns) before dogfooding found the feature itself was never implemented on `main`, so the block was removed to stop it silently no-opping. It's a genuinely useful pattern — self-refinement and ensemble debate are things teams build bespoke orchestration for today — and the closest thing OmniRoute names to it (`fusion`/`pipeline` routing strategies: parallel-panel-plus-judge, sequential pipeline) is presented as a first-class routing strategy, not a bolt-on. Reviving this properly, rather than leaving it as a documented-then-retracted feature, closes a real and specific parity gap.
+
+**Design sketch:**
+
+The previously-started implementation lived on `feature/model-chain` (`X-IXR-Chain` header), but that branch diverged before gaps 3/4/8/9 landed — its diff against current `main` touches 130 files with large deletions, which makes reviving it via rebase/cherry-pick riskier and slower than a fresh, small implementation against the current codebase. Reimplement using the config shape that already existed (and was already documented) rather than inventing a new one:
+
+```yaml
+# ixr.yaml
+chains:
+  fast-refine:
+    models:  [llama-3.3-70b-versatile, mistral-small-latest]
+    prompts: ["", "Improve the previous answer: fix any inaccuracies and make it more concise."]
+```
+
+```go
+// internal/domain/chain/chain.go
+type Chain struct {
+    Name    string
+    Models  []string
+    Prompts []string // same length as Models; Prompts[0] is typically "" (use the caller's original messages verbatim); Prompts[i>0] wraps the running transcript with a refinement instruction for that step
+}
+type Registry map[string]Chain
+```
+
+Trigger: the chain name is passed as `"model"` — consistent with how every other routing decision in ixr keys off the model field, rather than introducing a second, parallel dispatch mechanism via a header. In `chat.go`, chain lookup happens before the normal `h.router(req.Model)` call: `if c, ok := h.chains[req.Model]; ok { h.handleChain(w, r, c, &req); return }`.
+
+Execution: for step *i*, build a request whose messages are the caller's original messages, plus the prior step's assistant reply (for *i > 0*), plus a synthetic user turn carrying `Prompts[i]` (if non-empty), routed to `Models[i]` through the existing per-step `h.router` lookup and — since it already exists now — `routing.Execute` for retry-safety on each step. The response returned to the caller is the final step's response; intermediate steps are not exposed to the client in v1 (a debug/trace mechanism is a reasonable follow-up, not a blocker).
+
+Config loading: `internal/adapters/config/schema.go` gains a `Chains map[string]ChainConfig` section; `pkg/ixr/ixr.go` builds the `chain.Registry` alongside the other registries at startup, same wiring shape as everything else there.
+
+---
+
+### Gap 12 — Bandit Exploration in Primary Auto-Routing
+
+**What it is:** `model:"auto"` currently resolves through a purely deterministic scorer (`scoring.Engine.Decide`: policy filter → live `ModelPerfStore` stats → static weighted score → pick highest). The epsilon-greedy/UCB bandit that already exists (`internal/domain/scoring/bandit.go`) only feeds the opt-in shadow-routing path (`X-IXR-Shadow-Model` header) — it has never influenced a real, primary routing decision.
+
+**Why it matters:** This is the largest remaining gap between ixr's routing sophistication and what OmniRoute advertises (18 named routing strategies, including a bandit-driven "auto-combo engine" with progressive cooldown). ixr's deterministic scorer is reasonable but static: it can't discover that a given model is currently faster, cheaper, or more reliable than its configured priors suggest without an operator manually retuning `ModelCard` values. Wiring the existing bandit into primary decisions is what turns ixr's routing from well-tuned defaults into something that actually improves from live traffic — the specific claim OmniRoute makes that ixr currently doesn't back up anywhere outside the opt-in shadow path.
+
+**Design sketch:**
+
+Minimal-risk integration, given `scoring.Engine.Decide` is relied on by existing deterministic tests (`TestChatHandler_ModelAutoResolvesCatalog` asserts an exact model choice) that must keep passing when the feature is off:
+
+- With probability `1 - epsilon` (the bandit's existing parameter, default 0.1), `Decide` keeps today's behaviour unchanged — the top-scored deterministic candidate.
+- With probability `epsilon`, `Decide` instead asks the bandit (`EpsilonGreedy.SelectArm`, already implemented) to pick among the same filtered candidate set — pure exploration, no scoring math needed since the bandit already knows how to pick an arm.
+- Reward recording reuses the existing path: `internal/domain/scoring/shadow.go`'s orchestrator already computes a reward from latency/cost/success via `DefaultRewardWeights` and calls into the bandit — the same reward computation applies here, just triggered from a real primary-routed `CallEvent` instead of a shadow one. Needs a marker on `CallEvent` (`AutoRouted bool`, set in `chat.go`'s `model:"auto"` branch) so the reward-recording plugin knows which events came from `model:"auto"` versus an explicit model name — explicit requests never touch the bandit, since a caller who named a model didn't opt into exploration.
+
+Opt-in via `IXR_AUTO_BANDIT=true`, default off — matching the RFC's core constraint that the unconfigured state must be equivalent to the pre-feature state. Operators who want adaptive routing turn it on explicitly; everyone else, including the existing test suite, sees no behavioural change.
+
+---
+
 ## Plugin Architecture as the Extension Model
 
 The gaps above split into two categories by when they need to run:
