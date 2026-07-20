@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/YashVishwas/ixr/internal/domain/chain"
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
@@ -117,5 +119,38 @@ func TestChatHandler_ChainPublishesPerStepCallEvents(t *testing.T) {
 	ev2 := readEvent(t, published)
 	if ev1.Model != "model-a" || ev2.Model != "model-b" {
 		t.Errorf("expected one CallEvent per real step model, got %q then %q", ev1.Model, ev2.Model)
+	}
+}
+
+// TestChatHandler_ChainRespectsCircuitBreakerPerStep locks in a fix found
+// while dogfooding the demo: chain steps went through routing.Execute (so
+// retries worked) but never consulted or updated the circuit breaker, so a
+// known-bad model in a chain would be retried and re-tried on every future
+// chain run instead of failing fast like a direct request does.
+func TestChatHandler_ChainRespectsCircuitBreakerPerStep(t *testing.T) {
+	cb := circuitbreaker.NewRegistry(circuitbreaker.Policy{
+		SuccessRateThreshold: 0.90,
+		WindowDuration:       time.Minute,
+		MinRequests:          1,
+		HalfOpenAfter:        time.Hour,
+		ProbeCount:           1,
+	})
+	cb.RecordOutcome("model-a", false) // trips a MinRequests:1 breaker
+
+	calls := 0
+	stepA := &stubProvider{name: "provider-a", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		calls++
+		return &schema.ResponseEnvelope{ID: "a1", Choices: []schema.Choice{{}}}, nil
+	}}
+	router := multiRouter(map[string]provider.Provider{"model-a": stepA})
+	reg := chain.Registry{"c": chain.Chain{Name: "c", Models: []string{"model-a"}, Prompts: []string{""}}}
+	h := NewChatHandler(router, nil, WithChains(reg), WithCBRegistry(cb))
+
+	w := post(h, `{"model":"c","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if calls != 0 {
+		t.Errorf("step calls: got %d, want 0 (breaker should short-circuit before calling the provider)", calls)
 	}
 }

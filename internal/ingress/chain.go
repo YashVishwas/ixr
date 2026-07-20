@@ -17,12 +17,14 @@ import (
 // handleChain runs c's models sequentially — each step's assistant reply
 // feeds into the next step's prompt as the RFC's fast-refine/debate
 // patterns intend — and returns the final step's response to the caller.
-// Each step publishes its own CallEvent tagged with its real model, so
-// per-step cost/latency stay observable through the existing telemetry and
-// audit-log path without any new schema. Intermediate steps are not
-// streamed or exposed to the client in v1; a step failure aborts the chain
-// rather than skipping ahead, since a later step reasoning over a missing
-// prior turn would produce a confusing result.
+// Each step goes through the same observability and resilience path a
+// direct request does: a CallEvent tagged with its real model (telemetry/
+// audit-log, no new schema needed), a Prometheus metrics record, and a
+// circuit-breaker check/update — a chain is just N requests glued together,
+// not a separate code path that happens to skip the usual instrumentation.
+// Intermediate steps are not streamed or exposed to the client in v1; a
+// step failure aborts the chain rather than skipping ahead, since a later
+// step reasoning over a missing prior turn would produce a confusing result.
 func (h *ChatHandler) handleChain(w http.ResponseWriter, r *http.Request, c chain.Chain, req *schema.RequestEnvelope) {
 	id := identity.FromContext(r.Context())
 	base := append([]schema.Message(nil), req.Messages...)
@@ -38,9 +40,35 @@ func (h *ChatHandler) handleChain(w http.ResponseWriter, r *http.Request, c chai
 		}
 		stepReq := &schema.RequestEnvelope{Model: model, Messages: stepMessages}
 
+		if h.cbRegistry != nil && !h.cbRegistry.IsAllowed(model) {
+			slog.Error("chain step blocked", "chain", c.Name, "step", i, "model", model, "reason", "circuit breaker open")
+			writeError(w, http.StatusServiceUnavailable, "circuit_open", "chain step for model "+model+" unavailable (circuit breaker open)")
+			return
+		}
+
 		start := time.Now()
 		result, err := routing.Execute(r.Context(), routing.RoutingDecision{Model: model}, reasoning.AdjustTokenBudget(stepReq), routing.ProviderLookup(h.router), h.retryCfg)
 		latency := time.Since(start)
+
+		if h.cbRegistry != nil {
+			h.cbRegistry.RecordOutcome(model, err == nil)
+		}
+
+		if h.metrics != nil {
+			providerName := ""
+			if result.Provider != nil {
+				providerName = result.Provider.Name()
+			}
+			status := http.StatusOK
+			var tokIn, tokOut int
+			if err != nil {
+				status = http.StatusBadGateway
+			} else {
+				tokIn = result.Response.Usage.PromptTokens
+				tokOut = result.Response.Usage.CompletionTokens
+			}
+			h.metrics.Record(providerName, model, status, latency, tokIn, tokOut)
+		}
 
 		if h.bus != nil {
 			ev := &schema.CallEvent{
