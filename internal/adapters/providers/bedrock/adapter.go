@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -115,6 +116,18 @@ func (a *Adapter) buildBody(req *schema.RequestEnvelope) ([]byte, error) {
 	for _, m := range req.Messages {
 		if m.Role == "system" {
 			continue // system messages handled separately in full Anthropic Bedrock schema
+		}
+		if len(m.Parts) > 0 {
+			// Vision (RFC Gap 10) isn't wired for this adapter yet — only
+			// OpenAI, openaicompat, and Anthropic translate m.Parts today.
+			// m.Content already carries the flattened text (see
+			// pkg/schema/content.go's UnmarshalJSON), so the request still
+			// goes through as text-only rather than erroring or sending a
+			// malformed body — but silently, with no signal to the caller
+			// that the image was dropped. Surface that here so it's at
+			// least visible to the operator instead of a mystery "why did
+			// the model ignore my image" support ticket.
+			slog.Warn("bedrock: message has image/multipart content but this adapter only forwards text; image dropped", "role", m.Role)
 		}
 		msgs = append(msgs, message{Role: m.Role, Content: m.Content})
 	}

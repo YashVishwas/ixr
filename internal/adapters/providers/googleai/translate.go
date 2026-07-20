@@ -3,6 +3,7 @@ package googleai
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -123,6 +124,18 @@ func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 	}
 
 	for _, m := range req.Messages {
+		if len(m.Parts) > 0 {
+			// Vision (RFC Gap 10) isn't wired for this adapter yet — only
+			// OpenAI, openaicompat, and Anthropic translate m.Parts today.
+			// m.Content already carries the flattened text (see
+			// pkg/schema/content.go's UnmarshalJSON), so the request still
+			// goes through as text-only rather than erroring or sending a
+			// malformed body — but silently, with no signal to the caller
+			// that the image was dropped. Surface that here so it's at
+			// least visible to the operator instead of a mystery "why did
+			// the model ignore my image" support ticket.
+			slog.Warn("googleai: message has image/multipart content but this adapter only forwards text; image dropped", "role", m.Role)
+		}
 		if m.Role == "tool" {
 			name := m.Name
 			if name == "" {

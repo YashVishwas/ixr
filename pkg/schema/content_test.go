@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -116,4 +117,59 @@ func TestRequestEnvelope_MixedTextAndMultimodalMessages(t *testing.T) {
 	if len(req.Messages[1].Parts) != 2 {
 		t.Errorf("user message parts: got %d, want 2", len(req.Messages[1].Parts))
 	}
+}
+
+// FuzzMessage_ContentPolymorphism targets the custom UnmarshalJSON added
+// for RFC Gap 10 (vision): "content" is polymorphic on the wire (bare
+// string vs. content-part array), detected by peeking at the first byte
+// of the raw JSON. That's exactly the kind of hand-rolled parsing that's
+// easy to get subtly wrong on malformed input — huge base64 payloads,
+// broken data: URIs, mixed/nested shapes, wrong types where a string or
+// array is expected. The only property under fuzzing is "never panic";
+// Unmarshal returning an error for genuinely malformed input is fine and
+// expected.
+func FuzzMessage_ContentPolymorphism(f *testing.F) {
+	seeds := []string{
+		`{"role":"user","content":"hello"}`,
+		`{"role":"user","content":[{"type":"text","text":"hi"}]}`,
+		`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}`,
+		`{"role":"user","content":null}`,
+		`{"role":"user","content":42}`,
+		`{"role":"user","content":true}`,
+		`{"role":"user","content":[]}`,
+		`{"role":"user","content":[{}]}`,
+		`{"role":"user","content":[{"type":"image_url","image_url":null}]}`,
+		`{"role":"user","content":[{"type":"image_url","image_url":{"url":"not-a-real-uri"}}]}`,
+		`{"role":"user","content":[null]}`,
+		`{"role":"user","content":[[{"type":"text","text":"nested"}]]}`,
+		`{"role":"user","content":"` + strings.Repeat("A", 200000) + `"}`,
+		`{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("x", 100000) + `"}]}`,
+		`{"role":"user"`,        // truncated
+		`{"content":"no role"}`, // missing role
+		``,
+		`null`,
+		`[]`,
+		`"just a string"`,
+		`{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + strings.Repeat("Q", 500000) + `"}}]}`,
+	}
+	for _, s := range seeds {
+		f.Add([]byte(s))
+	}
+
+	f.Fuzz(func(t *testing.T, b []byte) {
+		var m Message
+		if err := json.Unmarshal(b, &m); err != nil {
+			return // malformed input erroring is fine; the property under test is "no panic"
+		}
+		// If it decoded, it must also re-encode without panicking, and the
+		// result must remain decodable (round-trip stability).
+		encoded, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("Marshal of a successfully-Unmarshaled Message failed: %v (message: %+v)", err, m)
+		}
+		var roundTrip Message
+		if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+			t.Fatalf("re-Unmarshal of Marshaled output failed: %v (encoded: %s)", err, encoded)
+		}
+	})
 }

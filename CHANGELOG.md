@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Google AI (Gemini/Gemma) and Bedrock adapters silently dropped image
+  content on vision requests: their message-translation loops only ever
+  read `m.Content`, never `m.Parts`, so the request still went through as
+  text-only (not erroring or corrupting the body — the documented
+  graceful-degradation trade-off) but with zero signal to the caller or
+  operator that the image was ignored. Both now emit `slog.Warn` when a
+  message carries `Parts` they can't translate. Also corrected the RFC's
+  Gap 10 status, which listed Ollama alongside these two as an open gap —
+  Ollama is a thin wrapper over the shared openaicompat adapter, which
+  already forwards `Parts` correctly; that was stale. Covered by new
+  tests in both adapter packages (Bedrock had no test file at all before
+  this) and a targeted fuzz test on `Message`'s custom JSON polymorphism
+  (`pkg/schema/content_test.go`, run for 2.5M+ executions with no crashes).
 - Semantic cache false hits on session history (RFC Open Question #10,
   now resolved): `SessionMiddleware`-injected history dominated the
   token-overlap score enough that two unrelated questions in the same
