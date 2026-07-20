@@ -1,7 +1,7 @@
 package anthropic
 
 import (
-	"fmt"
+	"encoding/json"
 	"time"
 
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -10,31 +10,60 @@ import (
 // Anthropic Messages API wire types — internal to this adapter.
 
 type wireRequest struct {
-	Model     string        `json:"model"`
-	Messages  []wireMessage `json:"messages"`
-	System    string        `json:"system,omitempty"`
-	MaxTokens int           `json:"max_tokens"`
-	Stream    bool          `json:"stream,omitempty"`
+	Model      string          `json:"model"`
+	Messages   []wireMessage   `json:"messages"`
+	System     string          `json:"system,omitempty"`
+	MaxTokens  int             `json:"max_tokens"`
+	Stream     bool            `json:"stream,omitempty"`
+	Tools      []wireTool      `json:"tools,omitempty"`
+	ToolChoice *wireToolChoice `json:"tool_choice,omitempty"`
 }
 
+// wireMessage.Content is always a content-block array. Anthropic accepts
+// this form for plain text too, which keeps one representation for text,
+// tool_use, and tool_result turns instead of a string/array union type.
 type wireMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string        `json:"role"`
+	Content []wireContent `json:"content"`
+}
+
+// wireContent is Anthropic's single content-block shape, reused across
+// requests and responses: "text" (Text), "tool_use" (ID/Name/Input, emitted
+// by the model), and "tool_result" (ToolUseID/Content, sent back to the
+// model as the outcome of a tool call).
+type wireContent struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	IsError   bool           `json:"is_error,omitempty"`
+}
+
+// wireTool is Anthropic's native tool definition shape — flat, unlike
+// OpenAI's {type, function: {...}} wrapper.
+type wireTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema,omitempty"`
+}
+
+// wireToolChoice mirrors Anthropic's {"type": "auto"|"any"|"tool", "name"}.
+type wireToolChoice struct {
+	Type string `json:"type"`
+	Name string `json:"name,omitempty"`
 }
 
 type wireResponse struct {
-	ID         string         `json:"id"`
-	Type       string         `json:"type"`
-	Role       string         `json:"role"`
-	Content    []wireContent  `json:"content"`
-	Model      string         `json:"model"`
-	StopReason string         `json:"stop_reason"`
-	Usage      wireUsage      `json:"usage"`
-}
-
-type wireContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	ID         string        `json:"id"`
+	Type       string        `json:"type"`
+	Role       string        `json:"role"`
+	Content    []wireContent `json:"content"`
+	Model      string        `json:"model"`
+	StopReason string        `json:"stop_reason"`
+	Usage      wireUsage     `json:"usage"`
 }
 
 type wireUsage struct {
@@ -55,10 +84,23 @@ func (w wireRequest) withStream() wireRequest {
 type streamMessageStart struct {
 	Type    string `json:"type"`
 	Message struct {
-		ID    string     `json:"id"`
-		Model string     `json:"model"`
-		Usage wireUsage  `json:"usage"`
+		ID    string    `json:"id"`
+		Model string    `json:"model"`
+		Usage wireUsage `json:"usage"`
 	} `json:"message"`
+}
+
+// streamContentBlockStart announces a new content block at Index. For
+// type=="tool_use" it carries the tool call's ID/Name up front; the
+// argument JSON itself streams in afterward via content_block_delta.
+type streamContentBlockStart struct {
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
+	ContentBlock struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"content_block"`
 }
 
 type streamContentBlockDelta struct {
@@ -66,7 +108,11 @@ type streamContentBlockDelta struct {
 	Index int    `json:"index"`
 	Delta struct {
 		Type string `json:"type"`
-		Text string `json:"text"`
+		// Text carries text_delta content; PartialJSON carries
+		// input_json_delta fragments for a tool_use block — concatenating
+		// them across the stream yields the complete arguments JSON.
+		Text        string `json:"text"`
+		PartialJSON string `json:"partial_json"`
 	} `json:"delta"`
 }
 
@@ -82,33 +128,118 @@ type streamMessageDelta struct {
 
 // toWireRequest converts ixr's canonical envelope to the Anthropic Messages API format.
 // System messages are lifted out of the messages array into the top-level system field,
-// as required by the Anthropic API.
+// as required by the Anthropic API. Anthropic has no role="tool" — consecutive tool
+// result messages are coalesced into a single role="user" message with one
+// tool_result content block per result, which the API requires.
 func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	var system string
 	var msgs []wireMessage
+	var pendingResults []wireContent
+
+	flushResults := func() {
+		if len(pendingResults) > 0 {
+			msgs = append(msgs, wireMessage{Role: "user", Content: pendingResults})
+			pendingResults = nil
+		}
+	}
 
 	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			pendingResults = append(pendingResults, wireContent{
+				Type:      "tool_result",
+				ToolUseID: m.ToolCallID,
+				Content:   m.Content,
+			})
+			continue
+		}
+		flushResults()
+
 		if m.Role == "system" {
 			system = m.Content
 			continue
 		}
-		msgs = append(msgs, wireMessage{Role: m.Role, Content: m.Content})
+
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			var blocks []wireContent
+			if m.Content != "" {
+				blocks = append(blocks, wireContent{Type: "text", Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				var input map[string]any
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				blocks = append(blocks, wireContent{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: input,
+				})
+			}
+			msgs = append(msgs, wireMessage{Role: "assistant", Content: blocks})
+			continue
+		}
+
+		msgs = append(msgs, wireMessage{
+			Role:    m.Role,
+			Content: []wireContent{{Type: "text", Text: m.Content}},
+		})
 	}
+	flushResults()
 
 	return wireRequest{
-		Model:     req.Model,
-		Messages:  msgs,
-		System:    system,
-		MaxTokens: defaultMaxTokens,
+		Model:      req.Model,
+		Messages:   msgs,
+		System:     system,
+		MaxTokens:  defaultMaxTokens,
+		Tools:      toWireTools(req.Tools),
+		ToolChoice: toWireToolChoice(req.ToolChoice),
 	}
+}
+
+func toWireTools(tools []schema.Tool) []wireTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]wireTool, len(tools))
+	for i, t := range tools {
+		out[i] = wireTool{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			InputSchema: t.Function.Parameters,
+		}
+	}
+	return out
+}
+
+// toWireToolChoice maps OpenAI-shaped tool_choice (a bare string, or a
+// {"type":"function","function":{"name":...}} object — RequestEnvelope
+// carries it as `any` since it comes straight off the JSON-decoded
+// request) onto Anthropic's {"type":"auto"|"any"|"tool","name":...}.
+func toWireToolChoice(choice any) *wireToolChoice {
+	switch v := choice.(type) {
+	case string:
+		switch v {
+		case "required":
+			return &wireToolChoice{Type: "any"}
+		case "auto":
+			return &wireToolChoice{Type: "auto"}
+		default: // "none" or anything else — let tools/,omitempty govern
+			return nil
+		}
+	case map[string]any:
+		if fn, ok := v["function"].(map[string]any); ok {
+			if name, ok := fn["name"].(string); ok && name != "" {
+				return &wireToolChoice{Type: "tool", Name: name}
+			}
+		}
+	}
+	return nil
 }
 
 // fromWireResponse converts an Anthropic response to ixr's canonical envelope.
 func fromWireResponse(wr *wireResponse) (*schema.ResponseEnvelope, error) {
-	text, err := extractText(wr.Content)
-	if err != nil {
-		return nil, err
-	}
+	text, toolCalls := splitContent(wr.Content)
+
+	finish := normalizeStopReason(wr.StopReason)
 
 	return &schema.ResponseEnvelope{
 		ID:      wr.ID,
@@ -117,9 +248,13 @@ func fromWireResponse(wr *wireResponse) (*schema.ResponseEnvelope, error) {
 		Model:   wr.Model,
 		Choices: []schema.Choice{
 			{
-				Index:        0,
-				Message:      schema.Message{Role: "assistant", Content: text},
-				FinishReason: normalizeStopReason(wr.StopReason),
+				Index: 0,
+				Message: schema.Message{
+					Role:      "assistant",
+					Content:   text,
+					ToolCalls: toolCalls,
+				},
+				FinishReason: finish,
 			},
 		},
 		Usage: schema.Usage{
@@ -130,13 +265,65 @@ func fromWireResponse(wr *wireResponse) (*schema.ResponseEnvelope, error) {
 	}, nil
 }
 
-func extractText(content []wireContent) (string, error) {
+// splitContent separates a response's text and tool_use blocks. A
+// tool-only response (no text block) is valid and yields an empty string,
+// not an error — the caller drives on ToolCalls/FinishReason instead.
+func splitContent(content []wireContent) (string, []schema.ToolCall) {
+	var text string
+	var calls []schema.ToolCall
 	for _, c := range content {
-		if c.Type == "text" {
-			return c.Text, nil
+		switch c.Type {
+		case "text":
+			text += c.Text
+		case "tool_use":
+			args, _ := json.Marshal(c.Input)
+			calls = append(calls, schema.ToolCall{
+				ID:   c.ID,
+				Type: "function",
+				Function: schema.ToolFunction{
+					Name:      c.Name,
+					Arguments: string(args),
+				},
+			})
 		}
 	}
-	return "", fmt.Errorf("anthropic: no text content block in response")
+	return text, calls
+}
+
+// streamToolCallAccumulator reassembles tool_use content blocks streamed as
+// content_block_start (ID/Name) + content_block_delta input_json_delta
+// fragments (Arguments, concatenated — Anthropic guarantees the
+// concatenation of partial_json fragments is valid JSON) into complete
+// schema.ToolCall values, preserving block order.
+type streamToolCallAccumulator struct {
+	byIndex map[int]*schema.ToolCall
+	order   []int
+}
+
+func newStreamToolCallAccumulator() *streamToolCallAccumulator {
+	return &streamToolCallAccumulator{byIndex: map[int]*schema.ToolCall{}}
+}
+
+func (a *streamToolCallAccumulator) start(index int, id, name string) {
+	tc := &schema.ToolCall{ID: id, Type: "function", Function: schema.ToolFunction{Name: name}}
+	a.byIndex[index] = tc
+	a.order = append(a.order, index)
+}
+
+func (a *streamToolCallAccumulator) appendArgs(index int, partialJSON string) {
+	if tc, ok := a.byIndex[index]; ok {
+		tc.Function.Arguments += partialJSON
+	}
+}
+
+func (a *streamToolCallAccumulator) empty() bool { return len(a.order) == 0 }
+
+func (a *streamToolCallAccumulator) finalize() []schema.ToolCall {
+	out := make([]schema.ToolCall, 0, len(a.order))
+	for _, idx := range a.order {
+		out = append(out, *a.byIndex[idx])
+	}
+	return out
 }
 
 // normalizeStopReason maps Anthropic stop reasons to OpenAI finish reasons
@@ -149,6 +336,8 @@ func normalizeStopReason(reason string) string {
 		return "length"
 	case "stop_sequence":
 		return "stop"
+	case "tool_use":
+		return "tool_calls"
 	default:
 		return reason
 	}

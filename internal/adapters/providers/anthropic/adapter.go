@@ -116,6 +116,7 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 
 	var msgID, model string
 	var inputTok int
+	toolCalls := newStreamToolCallAccumulator()
 
 	scanner := bufio.NewScanner(httpResp.Body)
 	var eventType string
@@ -139,18 +140,32 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 				inputTok = ms.Message.Usage.InputTokens
 			}
 
-		case "content_block_delta":
-			var cbd streamContentBlockDelta
-			if err := json.Unmarshal([]byte(data), &cbd); err != nil || cbd.Delta.Type != "text_delta" {
+		case "content_block_start":
+			var cbs streamContentBlockStart
+			if err := json.Unmarshal([]byte(data), &cbs); err != nil || cbs.ContentBlock.Type != "tool_use" {
 				continue
 			}
-			chunk := provider.StreamChunk{
-				ID:    msgID,
-				Model: model,
-				Delta: schema.Message{Role: "assistant", Content: cbd.Delta.Text},
+			toolCalls.start(cbs.Index, cbs.ContentBlock.ID, cbs.ContentBlock.Name)
+
+		case "content_block_delta":
+			var cbd streamContentBlockDelta
+			if err := json.Unmarshal([]byte(data), &cbd); err != nil {
+				continue
 			}
-			if err := fn(chunk); err != nil {
-				return err
+			switch cbd.Delta.Type {
+			case "text_delta":
+				chunk := provider.StreamChunk{
+					ID:    msgID,
+					Model: model,
+					Delta: schema.Message{Role: "assistant", Content: cbd.Delta.Text},
+				}
+				if err := fn(chunk); err != nil {
+					return err
+				}
+			case "input_json_delta":
+				// Tool call arguments accumulate silently; the caller sees
+				// them whole in the finish chunk below, same as content.
+				toolCalls.appendArgs(cbd.Index, cbd.Delta.PartialJSON)
 			}
 
 		case "message_delta":
@@ -168,6 +183,9 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 				Model:        model,
 				FinishReason: normalizeStopReason(md.Delta.StopReason),
 				Usage:        &u,
+			}
+			if !toolCalls.empty() {
+				chunk.Delta.ToolCalls = toolCalls.finalize()
 			}
 			if err := fn(chunk); err != nil {
 				return err

@@ -68,9 +68,11 @@ type ResponseEnvelope struct {
 
 // Message is a single turn in a conversation.
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"` // set on role="tool" messages; identifies which ToolCall this responds to
+	Name       string     `json:"name,omitempty"`         // optional function name on role="tool" messages
 }
 
 // Choice is one completion candidate in the response.
