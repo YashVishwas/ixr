@@ -44,6 +44,7 @@ import (
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
+	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
@@ -163,6 +164,24 @@ func Start(opts ...Option) error {
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
 	responseCache := cache.NewMemory(cacheSize, cacheTTL)
 
+	// --- Model chains (RFC Gap 11) ---
+	chainDefs := make(map[string]struct {
+		Models  []string
+		Prompts []string
+	})
+	if fileCfg != nil {
+		for name, c := range fileCfg.Chains {
+			chainDefs[name] = struct {
+				Models  []string
+				Prompts []string
+			}{Models: c.Models, Prompts: c.Prompts}
+		}
+	}
+	chainRegistry, err := chain.BuildRegistry(chainDefs)
+	if err != nil {
+		return fmt.Errorf("chains config: %w", err)
+	}
+
 	// --- Chat handler ---
 	chatHandler := ingress.NewChatHandler(
 		router,
@@ -171,6 +190,7 @@ func Start(opts ...Option) error {
 		ingress.WithCBRegistry(cbRegistry),
 		ingress.WithShadow(shadowOrch),
 		ingress.WithMetrics(metrics),
+		ingress.WithChains(chainRegistry),
 	)
 
 	// --- Rate limiter ---

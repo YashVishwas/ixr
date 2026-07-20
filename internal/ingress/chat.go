@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/cost"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
@@ -55,6 +56,12 @@ func WithMetrics(m *observability.Metrics) ChatOption {
 	return func(h *ChatHandler) { h.metrics = m }
 }
 
+// WithChains registers named model chains (see docs/rfc/0001-semantic-cache.md
+// Gap 11), dispatched when "model" names a chain instead of a real model.
+func WithChains(reg chain.Registry) ChatOption {
+	return func(h *ChatHandler) { h.chains = reg }
+}
+
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
@@ -65,6 +72,7 @@ type ChatHandler struct {
 	shadow     *scoring.Orchestrator
 	retryCfg   routing.RetryConfig
 	metrics    *observability.Metrics
+	chains     chain.Registry
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
@@ -96,6 +104,11 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "missing_messages", "messages field must contain at least one message")
+		return
+	}
+
+	if c, ok := h.chains.Lookup(req.Model); ok {
+		h.handleChain(w, r, c, &req)
 		return
 	}
 
