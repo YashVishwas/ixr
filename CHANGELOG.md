@@ -80,6 +80,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Budget enforcement (`plugins/budget`) had a TOCTOU race: `Intercept`
+  checked `spent`, which is only updated by `OnEvent` — async, post-call,
+  on the far side of a full LLM round trip. A burst of concurrent requests
+  arriving while spend was still under the ceiling could all pass
+  `Intercept` before any of their `OnEvent` accumulated real spend,
+  overspending the ceiling by up to the burst size. `Intercept` now
+  reserves each scope's running average cost per call synchronously before
+  admitting the request; `OnEvent` releases the reservation and folds the
+  real cost into that average regardless of outcome (a failed call still
+  gives its reservation back). Self-calibrating from observed traffic, no
+  new config — a scope's first-ever burst has no prior average to reserve
+  against, which is a bounded cold-start gap rather than the previous
+  unbounded one. Reproduced and fixed under `go test -race`.
 - `chains:` requests ignored `stream:true` and always returned a plain JSON
   body instead of SSE: `chat.go` dispatched to `handleChain` before the
   `req.Stream` check ever ran. The terminal call in a chain (last

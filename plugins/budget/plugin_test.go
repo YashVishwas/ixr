@@ -2,6 +2,8 @@ package budget
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -264,6 +266,120 @@ func TestReset(t *testing.T) {
 	p.Reset("acme")
 	if err := p.Intercept(ctxWith("acme", "", ""), &schema.RequestEnvelope{}); err != nil {
 		t.Fatalf("after reset should not block, got: %v", err)
+	}
+}
+
+// --- TOCTOU race: burst concurrency at the budget boundary ---
+
+// TestReservation_CapsAdmissionUnderConcurrentBurst reproduces the race
+// found while stress-testing budget enforcement: Intercept only ever
+// checked p.spent, which is exclusively updated by OnEvent — async,
+// post-call, on the far side of a full LLM round trip. A burst of N
+// concurrent requests arriving while spend is still under the ceiling used
+// to all pass Intercept before any of their OnEvent could accumulate real
+// spend, overspending the ceiling by up to N calls' worth. This test warms
+// up the scope's running average cost (so the reservation has something to
+// work with — the fix is self-calibrating, not configured) and then fires
+// a burst of concurrent Intercept calls with no matching OnEvent yet, i.e.
+// exactly the in-flight window the race lived in. Admission must now be
+// bounded by remaining budget / avgCost, not by burst size.
+func TestReservation_CapsAdmissionUnderConcurrentBurst(t *testing.T) {
+	limits := map[string]Limit{"acme": {LimitUSD: 5.0}}
+	p := New(limits, nil, "")
+
+	// Warm up: 3 real $1 calls, spend now $3, avgCost calibrated to $1.
+	for i := 0; i < 3; i++ {
+		_ = p.OnEvent(context.Background(), makeEvent("acme", 1.0))
+	}
+	if got := p.Spent("acme"); got != 3.0 {
+		t.Fatalf("warmup spend: got %f, want 3.0", got)
+	}
+
+	// $2 of nominal headroom remains at ~$1/call avg → at most ~2 concurrent
+	// admissions should succeed. Fire 20 concurrent Intercept calls with no
+	// OnEvent in between, simulating 20 requests arriving in the same
+	// instant before any of them has finished.
+	const burst = 20
+	var wg sync.WaitGroup
+	var admitted int64
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := p.Intercept(ctxWith("acme", "", ""), &schema.RequestEnvelope{}); err == nil {
+				atomic.AddInt64(&admitted, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if admitted > 3 {
+		t.Errorf("admitted %d of %d concurrent requests against $2 of headroom at ~$1/call — reservation should have capped this well below the burst size", admitted, burst)
+	}
+	if admitted == 0 {
+		t.Error("admitted 0 — reservation should still allow some concurrency where budget genuinely has room")
+	}
+}
+
+// TestReservation_ReleasedAndReconciledOnSuccess verifies a reservation
+// made in Intercept is fully released and folded into the running average
+// once OnEvent reports the real cost — it must not permanently inflate the
+// scope's effective spend.
+func TestReservation_ReleasedAndReconciledOnSuccess(t *testing.T) {
+	limits := map[string]Limit{"acme": {LimitUSD: 10.0}}
+	p := New(limits, nil, "")
+
+	_ = p.OnEvent(context.Background(), makeEvent("acme", 2.0)) // warm up avgCost to 2.0
+	if err := p.Intercept(ctxWith("acme", "", ""), &schema.RequestEnvelope{}); err != nil {
+		t.Fatalf("unexpected block reserving: %v", err)
+	}
+
+	p.mu.Lock()
+	reservedAfterIntercept := p.reserved["acme"]
+	p.mu.Unlock()
+	if reservedAfterIntercept != 2.0 {
+		t.Fatalf("expected a $2.0 reservation after Intercept, got %f", reservedAfterIntercept)
+	}
+
+	_ = p.OnEvent(context.Background(), makeEvent("acme", 3.0)) // the real cost differs from the estimate
+
+	p.mu.Lock()
+	reservedAfter := p.reserved["acme"]
+	p.mu.Unlock()
+	if reservedAfter != 0 {
+		t.Errorf("reservation should be fully released after OnEvent, got %f still reserved", reservedAfter)
+	}
+	if got := p.Spent("acme"); got != 5.0 {
+		t.Errorf("spent should reflect the real costs only (2.0 + 3.0), got %f", got)
+	}
+}
+
+// TestReservation_ReleasedOnCallFailure verifies a reservation is released
+// when the call it was reserved for ultimately fails — otherwise a string
+// of failures would permanently eat into the budget without any real spend
+// to show for it, eventually blocking a scope that never actually spent
+// anything close to its limit.
+func TestReservation_ReleasedOnCallFailure(t *testing.T) {
+	limits := map[string]Limit{"acme": {LimitUSD: 10.0}}
+	p := New(limits, nil, "")
+
+	_ = p.OnEvent(context.Background(), makeEvent("acme", 2.0)) // warm up avgCost to 2.0
+	if err := p.Intercept(ctxWith("acme", "", ""), &schema.RequestEnvelope{}); err != nil {
+		t.Fatalf("unexpected block reserving: %v", err)
+	}
+
+	failed := makeEvent("acme", 0) // provider error: no real cost incurred
+	failed.Error = "upstream unavailable"
+	_ = p.OnEvent(context.Background(), failed)
+
+	p.mu.Lock()
+	reservedAfter := p.reserved["acme"]
+	p.mu.Unlock()
+	if reservedAfter != 0 {
+		t.Errorf("reservation should be released even when the call failed, got %f still reserved", reservedAfter)
+	}
+	if got := p.Spent("acme"); got != 2.0 {
+		t.Errorf("a failed call must not add to spent, got %f (want just the 2.0 warmup)", got)
 	}
 }
 

@@ -46,10 +46,13 @@ type deltaEntry struct {
 // "tenantID:teamID:userID". A request is blocked if ANY scope in the caller's
 // hierarchy is over its ceiling.
 type Plugin struct {
-	mu     sync.Mutex
-	spent  map[string]float64 // scope key → cumulative USD
-	warned map[string]bool    // scope keys for which a warning has been emitted
-	limits map[string]Limit   // scope key → configured limit
+	mu       sync.Mutex
+	spent    map[string]float64 // scope key → cumulative USD
+	reserved map[string]float64 // scope key → sum of in-flight reservations awaiting reconciliation
+	avgCost  map[string]float64 // scope key → running average cost per call, used to size a reservation
+	calls    map[string]int64   // scope key → sample count backing avgCost's running average
+	warned   map[string]bool    // scope keys for which a warning has been emitted
+	limits   map[string]Limit   // scope key → configured limit
 
 	bus    bus.Bus
 	file   *os.File
@@ -66,10 +69,13 @@ type Plugin struct {
 // dir is the directory for the spend journal; "" = in-memory only.
 func New(limits map[string]Limit, b bus.Bus, dir string) *Plugin {
 	p := &Plugin{
-		spent:  make(map[string]float64),
-		warned: make(map[string]bool),
-		limits: limits,
-		bus:    b,
+		spent:    make(map[string]float64),
+		reserved: make(map[string]float64),
+		avgCost:  make(map[string]float64),
+		calls:    make(map[string]int64),
+		warned:   make(map[string]bool),
+		limits:   limits,
+		bus:      b,
 	}
 	if dir != "" {
 		p.replayJournal(filepath.Join(dir, "budget.jsonl"))
@@ -81,19 +87,37 @@ func New(limits map[string]Limit, b bus.Bus, dir string) *Plugin {
 func (p *Plugin) Name() string { return "budget" }
 
 // Intercept blocks the request if ANY level in the caller's budget hierarchy
-// is over its ceiling. Checks user → team → tenant in order; the first
-// exceeded scope short-circuits.
+// is over its ceiling, or would go over once this call's estimated cost is
+// counted. Checks user → team → tenant in order; the first exceeded scope
+// short-circuits.
+//
+// The estimate comes from each scope's running average cost per call
+// (avgCost, updated in OnEvent) and is reserved synchronously here, before
+// the call is made. Without this, a burst of concurrent requests arriving
+// while spend is still under the ceiling can all pass this check before any
+// of their (async, post-call) OnEvent accumulates real spend — overspending
+// the ceiling by up to the burst size, since the check and the accumulation
+// are separated by a full LLM round trip. The reservation is released and
+// reconciled to the real cost in OnEvent regardless of outcome, so it never
+// permanently inflates the ceiling. A scope with no prior traffic has
+// avgCost 0, so its first-ever burst is not protected — the estimate is
+// self-calibrating, not configured, so there's an unavoidable cold-start
+// gap rather than a permanent one.
 func (p *Plugin) Intercept(ctx context.Context, req *schema.RequestEnvelope) error {
 	id := identity.FromContext(ctx)
-	for _, scope := range scopeKeys(id) {
+	scopes := scopeKeys(id)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, scope := range scopes {
 		lim, ok := p.limits[scope]
 		if !ok {
 			continue
 		}
-		p.mu.Lock()
 		spent := p.spent[scope]
-		p.mu.Unlock()
-		if spent >= lim.LimitUSD {
+		projected := spent + p.reserved[scope] + p.avgCost[scope]
+		if spent >= lim.LimitUSD || projected > lim.LimitUSD {
 			return &guardrail.BlockedError{
 				Interceptor: p.Name(),
 				Category:    "budget_exceeded",
@@ -102,22 +126,56 @@ func (p *Plugin) Intercept(ctx context.Context, req *schema.RequestEnvelope) err
 			}
 		}
 	}
+
+	for _, scope := range scopes {
+		if _, ok := p.limits[scope]; ok {
+			p.reserved[scope] += p.avgCost[scope]
+		}
+	}
 	return nil
 }
 
 // OnEvent accumulates spend at every scope in the hierarchy simultaneously.
 // A $0.05 call by "acme:eng:alice" increments "acme:eng:alice", "acme:eng",
 // and "acme" — so each level's ceiling is always up to date.
+//
+// It also releases the reservation Intercept made for this call and folds
+// the real cost into that scope's running average, regardless of whether
+// the call succeeded — a failed call still consumed its reservation and
+// must give the budget back, it just doesn't add to avgCost or spent since
+// no real cost was incurred. Shadow calls never went through Intercept (the
+// interceptor chain only gates the primary request path), so they have no
+// reservation to release and are skipped entirely, same as before.
 func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
-	if ev.Error != "" || ev.Shadow != nil {
-		return nil
-	}
-	cost := ev.Cost.TotalUSD
-	if cost <= 0 {
+	if ev.Shadow != nil {
 		return nil
 	}
 
 	scopes := scopeKeys(schema.Identity{TenantID: ev.TenantID, TeamID: ev.TeamID, UserID: ev.UserID})
+	cost := ev.Cost.TotalUSD
+	hasCost := ev.Error == "" && cost > 0
+
+	p.mu.Lock()
+	for _, scope := range scopes {
+		if _, ok := p.limits[scope]; !ok {
+			continue
+		}
+		if p.reserved[scope] > 0 {
+			p.reserved[scope] -= p.avgCost[scope]
+			if p.reserved[scope] < 0 {
+				p.reserved[scope] = 0
+			}
+		}
+		if hasCost {
+			p.calls[scope]++
+			p.avgCost[scope] += (cost - p.avgCost[scope]) / float64(p.calls[scope])
+		}
+	}
+	p.mu.Unlock()
+
+	if !hasCost {
+		return nil
+	}
 
 	for _, scope := range scopes {
 		lim, hasLimit := p.limits[scope]
@@ -169,6 +227,9 @@ func (p *Plugin) Reset(key string) {
 	p.mu.Lock()
 	delete(p.spent, key)
 	delete(p.warned, key)
+	delete(p.reserved, key)
+	delete(p.avgCost, key)
+	delete(p.calls, key)
 	p.mu.Unlock()
 }
 
