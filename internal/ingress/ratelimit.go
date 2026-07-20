@@ -57,3 +57,14 @@ func (rc *responseCapture) Write(b []byte) (int, error) {
 	rc.bytesWritten += n
 	return n, err
 }
+
+// Flush forwards to the underlying ResponseWriter's Flusher so streaming
+// responses still work when passed through this wrapper. Without this,
+// wrapping in responseCapture silently breaks the http.Flusher type
+// assertion the SSE handler relies on for every request, not just
+// rate-limited ones.
+func (rc *responseCapture) Flush() {
+	if f, ok := rc.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

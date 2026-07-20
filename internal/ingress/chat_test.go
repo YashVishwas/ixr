@@ -76,7 +76,7 @@ func TestChatHandler_MissingModel(t *testing.T) {
 
 func TestChatHandler_StreamReturnsSSE(t *testing.T) {
 	h := NewChatHandler(fixedRouter(&stubProvider{name: "test"}), nil)
-	w := post(h, `{"model":"gpt-4o","stream":true,"messages":[]}`)
+	w := post(h, `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK {
 		t.Errorf("status: got %d, want 200", w.Code)
 	}
@@ -170,7 +170,7 @@ func TestChatHandler_ModelAutoResolvesCatalog(t *testing.T) {
 func TestChatHandler_ModelAutoNoMatch(t *testing.T) {
 	h := NewChatHandler(fixedRouter(&stubProvider{}), nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		bytes.NewReader([]byte(`{"model":"auto","messages":[]}`)))
+		bytes.NewReader([]byte(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-IXR-Budget", "0.0001")
 	w := httptest.NewRecorder()
@@ -191,7 +191,7 @@ func TestChatHandler_UseCaseHeader(t *testing.T) {
 	h := NewChatHandler(fixedRouter(p), fakeBus)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[]}`)))
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-IXR-UseCase", "test-case-42")
 	w := httptest.NewRecorder()
@@ -375,7 +375,7 @@ func TestChatHandler_ShadowRoutingSameModelSkipped(t *testing.T) {
 	h := NewChatHandler(fixedRouter(p), fakeBus)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[]}`)))
+		bytes.NewReader([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(headerShadowModel, "gpt-4o")
 	w := httptest.NewRecorder()

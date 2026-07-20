@@ -2,7 +2,32 @@
 // Everything in this package is semver-governed; third parties build on these types.
 package schema
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// EventLatency is a call duration serialized as a plain integer number of
+// milliseconds. time.Duration has no custom MarshalJSON — it serializes as
+// raw nanoseconds — which silently mismatched the "latency_ms" tag below for
+// any consumer reading CallEvent JSON directly (audit log, webhook fanout).
+// Behaves like time.Duration for callers (Milliseconds() is preserved).
+type EventLatency time.Duration
+
+func (d EventLatency) Milliseconds() int64 { return time.Duration(d).Milliseconds() }
+
+func (d EventLatency) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.Milliseconds())
+}
+
+func (d *EventLatency) UnmarshalJSON(b []byte) error {
+	var ms int64
+	if err := json.Unmarshal(b, &ms); err != nil {
+		return err
+	}
+	*d = EventLatency(ms * int64(time.Millisecond))
+	return nil
+}
 
 // CallEvent is emitted on the bus for every LLM call that passes through ixr.
 // It is the primary unit of data the intelligence layer consumes.
@@ -15,7 +40,7 @@ type CallEvent struct {
 	UserID    string           `json:"user_id,omitempty"` // from identity context
 	Provider  string           `json:"provider"`
 	Model     string           `json:"model"`
-	Latency   time.Duration    `json:"latency_ms"`
+	Latency   EventLatency     `json:"latency_ms"`
 	TokensIn  int              `json:"tokens_in"`
 	TokensOut int              `json:"tokens_out"`
 	Cost      CostBreakdown    `json:"cost"`

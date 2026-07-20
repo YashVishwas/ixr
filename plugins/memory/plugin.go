@@ -60,8 +60,12 @@ func (p *Plugin) OnEvent(ctx context.Context, ev *schema.CallEvent) error {
 
 // userKeyFromEvent builds a stable key from event fields.
 // Returns "" when UserID is not available (memories are user-scoped).
+// "default" is a legitimate TenantID (the identity resolver's default for
+// single-tenant deployments) and must not be treated as anonymous — must
+// stay in sync with ingress.memoryUserKey, which reads entries under the
+// same "tenantID:userID" format.
 func userKeyFromEvent(ev *schema.CallEvent) string {
-	if ev.TenantID == "" || ev.TenantID == "default" || ev.UserID == "" {
+	if ev.TenantID == "" || ev.UserID == "" {
 		return ""
 	}
 	return ev.TenantID + ":" + ev.UserID

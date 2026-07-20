@@ -86,11 +86,14 @@ func (m *MemoryMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // memoryUserKey returns a store key for the identity, or "" if the identity
-// is anonymous (no concrete TenantID+UserID to scope memories to). Must stay
-// in sync with plugins/memory.userKeyFromEvent, which writes entries under
-// the same "tenantID:userID" format.
+// is anonymous (no concrete UserID to scope memories to). "default" is a
+// legitimate TenantID — it's what the identity resolver assigns whenever a
+// request doesn't set X-IXR-TenantID, which is the common single-tenant
+// deployment — so it must not be treated as anonymous. Must stay in sync
+// with plugins/memory.userKeyFromEvent, which writes entries under the same
+// "tenantID:userID" format.
 func memoryUserKey(id schema.Identity) string {
-	if id.TenantID == "" || id.TenantID == "default" || id.UserID == "" {
+	if id.TenantID == "" || id.UserID == "" {
 		return ""
 	}
 	return id.TenantID + ":" + id.UserID
