@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/session"
@@ -88,6 +89,10 @@ func (m *SessionMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(encoded))
 	r.ContentLength = int64(len(encoded))
+
+	// 6b. Tell the cache layer how much of the message list is injected
+	// history, not the caller's new turn — see cache.WithHistoryLen.
+	r = r.WithContext(cache.WithHistoryLen(r.Context(), historyLen))
 
 	// 7. Echo the session ID in the response so the client can persist it.
 	w.Header().Set(headerSessionID, sessionID)

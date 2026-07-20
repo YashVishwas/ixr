@@ -90,7 +90,8 @@ func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope)
 		return resp, hit, true
 	}
 
-	text := requestText(req)
+	historyLen, _ := HistoryLenFromContext(ctx)
+	text := requestText(req, historyLen)
 	if text == "" {
 		return nil, CacheHitNone, false
 	}
@@ -116,7 +117,8 @@ func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope)
 func (s *SemanticCache) Store(ctx context.Context, req *schema.RequestEnvelope, resp *schema.ResponseEnvelope, ttl time.Duration) {
 	s.exact.Store(ctx, req, resp, ttl)
 
-	text := requestText(req)
+	historyLen, _ := HistoryLenFromContext(ctx)
+	text := requestText(req, historyLen)
 	if text == "" {
 		return
 	}
@@ -130,11 +132,19 @@ func (s *SemanticCache) Store(ctx context.Context, req *schema.RequestEnvelope, 
 	s.backend.Store(ctx, vec, resp, ttl)
 }
 
-// requestText extracts user and system message content for embedding.
-// Assistant turns are excluded — we match on the input, not the prior exchange.
-func requestText(req *schema.RequestEnvelope) string {
+// requestText extracts user and system message content for embedding,
+// starting from historyLen so SessionMiddleware-injected history is
+// excluded — only the caller's actual new turn drives semantic matching.
+// historyLen 0 (no session middleware, or no history yet) considers the
+// full message list, matching pre-fix behavior. Assistant turns are always
+// excluded — we match on the input, not the prior exchange.
+func requestText(req *schema.RequestEnvelope, historyLen int) string {
+	messages := req.Messages
+	if historyLen > 0 && historyLen <= len(messages) {
+		messages = messages[historyLen:]
+	}
 	var b strings.Builder
-	for _, m := range req.Messages {
+	for _, m := range messages {
 		if m.Role == "user" || m.Role == "system" {
 			b.WriteString(m.Content)
 			b.WriteByte('\n')

@@ -80,6 +80,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Semantic cache false hits on session history (RFC Open Question #10,
+  now resolved): `SessionMiddleware`-injected history dominated the
+  token-overlap score enough that two unrelated questions in the same
+  session could false-hit against each other. `SessionMiddleware` now
+  attaches `historyLen` to the request context (`cache.WithHistoryLen`);
+  `SemanticCache` embeds only the caller's actual new turn beyond it.
+  `ExactCache` is unchanged — hashing the full message list including
+  history is correct for exact-match. Fixing this first required merging
+  the long-unmerged `semantic-cache` branch (Gap 2) into the mainline, since
+  despite the RFC listing it as implemented it had never actually landed on
+  `main`. Covered by both a cache-layer regression test and a new end-to-end
+  `SessionMiddleware` → `CacheMiddleware` → `ChatHandler` integration test
+  (previously, that composed chain had no test coverage at all); the
+  end-to-end test was confirmed to fail without the fix before being
+  restored to green.
 - Budget enforcement (`plugins/budget`) had a TOCTOU race: `Intercept`
   checked `spent`, which is only updated by `OnEvent` — async, post-call,
   on the far side of a full LLM round trip. A burst of concurrent requests

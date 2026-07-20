@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
 // --- WordVectorizer ---
@@ -231,6 +233,106 @@ func TestSemanticCache_Miss(t *testing.T) {
 	}
 	if hit != CacheHitNone {
 		t.Fatalf("expected CacheHitNone on miss, got %v", hit)
+	}
+}
+
+// sharedHistory is a long, topically consistent SessionMiddleware-style
+// injected history: several user/assistant pairs about the French
+// Revolution. It's long enough relative to a short new turn that it
+// dominates a naive full-message-list token-overlap score.
+func sharedHistory() []schema.Message {
+	return []schema.Message{
+		{Role: "user", Content: "Can you give me an overview of the French Revolution, its main causes, and why it started when it did"},
+		{Role: "assistant", Content: "The French Revolution began in 1789, driven by financial crisis, food shortages, resentment of absolute monarchy, and Enlightenment ideas about liberty and equality"},
+		{Role: "user", Content: "Who were the key figures involved in the French Revolution and what roles did they play in its events"},
+		{Role: "assistant", Content: "Key figures included Robespierre, Danton, Marat, and Louis XVI, each playing distinct roles across the Revolution's escalating radical phases"},
+		{Role: "user", Content: "What were the long term consequences of the French Revolution for France and for Europe as a whole"},
+		{Role: "assistant", Content: "The Revolution reshaped France's political system, ended feudal privilege, and inspired nationalist and republican movements across Europe for decades afterward"},
+	}
+}
+
+// TestSemanticCache_SessionHistoryCausesFalseHitWithoutHistoryLen
+// reproduces the bug documented as unresolved in
+// docs/rfc/0001-semantic-cache.md Open Question #10: when the caller's
+// context has no historyLen (the state before SessionMiddleware wires it
+// through), a rich shared history dominates the token-overlap score enough
+// that two completely unrelated new questions in the same session score as
+// a semantic hit against each other.
+func TestSemanticCache_SessionHistoryCausesFalseHitWithoutHistoryLen(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	backend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, backend, WordVectorizer{}, 0.92)
+	ctx := context.Background() // no historyLen set — pre-fix behavior
+
+	history := sharedHistory()
+	stored := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "What year did the revolution start?"})}
+	sc.Store(ctx, stored, makeResp("revolution-answer"), time.Minute)
+
+	// Same injected history, but a genuinely unrelated new question.
+	query := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "Give me a recipe for chocolate cake."})}
+	_, hit, ok := sc.Lookup(ctx, query)
+
+	if !ok || hit != CacheHitSemantic {
+		t.Fatalf("expected this to reproduce the documented false hit (shared history dominating token overlap) when no historyLen is set, got hit=%v ok=%v — if this no longer reproduces, the scoring changed and TestSemanticCache_HistoryLenPreventsSessionFalseHit's improvement can no longer be trusted to mean what it claims", hit, ok)
+	}
+}
+
+// TestSemanticCache_HistoryLenPreventsSessionFalseHit is the fix: once
+// SessionMiddleware communicates historyLen via cache.WithHistoryLen, the
+// exact same two requests as above (identical shared history, unrelated
+// new questions) correctly miss instead of false-hitting, because only the
+// net-new turn drives the embedding.
+func TestSemanticCache_HistoryLenPreventsSessionFalseHit(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	backend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, backend, WordVectorizer{}, 0.92)
+
+	history := sharedHistory()
+	historyLen := len(history)
+	ctx := WithHistoryLen(context.Background(), historyLen)
+
+	stored := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "What year did the revolution start?"})}
+	sc.Store(ctx, stored, makeResp("revolution-answer"), time.Minute)
+
+	query := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "Give me a recipe for chocolate cake."})}
+	_, hit, ok := sc.Lookup(ctx, query)
+
+	if ok {
+		t.Errorf("expected a miss once history is excluded from the embedding — the two new turns share no topic, got hit=%v", hit)
+	}
+}
+
+// TestSemanticCache_HistoryLenStillMatchesGenuineNearDuplicateNewTurn
+// guards against the fix being too aggressive: a genuinely near-duplicate
+// new turn (same shared history, near-identical new question) should still
+// hit once history is excluded — the fix scopes the embedding to the new
+// turn, it doesn't disable semantic matching on that turn.
+func TestSemanticCache_HistoryLenStillMatchesGenuineNearDuplicateNewTurn(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	backend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, backend, WordVectorizer{}, 0.88)
+
+	history := sharedHistory()
+	historyLen := len(history)
+	ctx := WithHistoryLen(context.Background(), historyLen)
+
+	stored := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "please summarize this document for me"})}
+	sc.Store(ctx, stored, makeResp("sem-hit"), time.Minute)
+
+	query := &schema.RequestEnvelope{Model: "gpt-4o", Messages: append(append([]schema.Message(nil), history...),
+		schema.Message{Role: "user", Content: "please summarize this document for me quickly"})}
+	_, hit, ok := sc.Lookup(ctx, query)
+
+	if !ok || hit != CacheHitSemantic {
+		t.Errorf("expected a semantic hit on a genuine near-duplicate new turn even with history excluded, got hit=%v ok=%v", hit, ok)
 	}
 }
 
