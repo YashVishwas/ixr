@@ -383,6 +383,50 @@ func TestReservation_ReleasedOnCallFailure(t *testing.T) {
 	}
 }
 
+// TestConcurrentMultiTenantIsolation stresses budget enforcement the way
+// production traffic actually would: many goroutines across several
+// tenants hammering Intercept and OnEvent simultaneously, rather than the
+// sequential single-tenant pattern every other test in this file uses.
+// Two properties matter here, both proven wrong by a single shared map key
+// or a scope-key collision bug: no tenant's spend leaks into another
+// tenant's total, and no tenant's traffic causes another tenant to be
+// blocked. Run under go test -race.
+func TestConcurrentMultiTenantIsolation(t *testing.T) {
+	tenants := []string{"acme", "globex", "initech"}
+	limits := map[string]Limit{}
+	for _, tn := range tenants {
+		limits[tn] = Limit{LimitUSD: 1000.0} // generous — no tenant should ever block here
+	}
+	p := New(limits, nil, "")
+
+	const callsPerTenant = 200
+	var wg sync.WaitGroup
+	var blocked int64
+	for _, tn := range tenants {
+		wg.Add(1)
+		go func(tenant string) {
+			defer wg.Done()
+			for i := 0; i < callsPerTenant; i++ {
+				if err := p.Intercept(ctxWith(tenant, "", ""), &schema.RequestEnvelope{}); err != nil {
+					atomic.AddInt64(&blocked, 1)
+					continue
+				}
+				_ = p.OnEvent(context.Background(), makeEvent(tenant, 1.0))
+			}
+		}(tn)
+	}
+	wg.Wait()
+
+	if blocked != 0 {
+		t.Errorf("no tenant should have been blocked against a $1000 limit at $1/call * %d calls, got %d blocks", callsPerTenant, blocked)
+	}
+	for _, tn := range tenants {
+		if got := p.Spent(tn); got != float64(callsPerTenant) {
+			t.Errorf("tenant %q: spend leaked or was lost — got %f, want exactly %d (one tenant's $1 calls must not add to or subtract from another's total)", tn, got, callsPerTenant)
+		}
+	}
+}
+
 // --- helpers ---
 
 type countBus struct{ n *int }

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Concurrency stress tests exercising real production-shaped load (many
+  goroutines, not the sequential single-caller pattern the existing test
+  suite otherwise uses everywhere): `TestSemanticCache_ConcurrentLookupAndStore`
+  (50 goroutines x 40 ops of interleaved Lookup/Store) and
+  `TestConcurrentMultiTenantIsolation` (three tenants hammering
+  Intercept/OnEvent simultaneously, asserting no spend leaks or blocks
+  cross tenant boundaries). Both pass under `go test -race`; ran the full
+  suite under `-race` as a baseline alongside them.
 - Fusion chain strategy (RFC Gap 11 extension) and progressive bandit
   cooldown (RFC Gap 12 extension): the two remaining pieces of the OmniRoute
   parity gaps this RFC calls out by name — "18 named routing strategies

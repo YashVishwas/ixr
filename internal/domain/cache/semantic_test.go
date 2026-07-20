@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,6 +355,38 @@ func TestExactCache_RoundTrip(t *testing.T) {
 	if hit != CacheHitExact {
 		t.Fatalf("expected CacheHitExact, got %v", hit)
 	}
+}
+
+// TestSemanticCache_ConcurrentLookupAndStore stresses the cache the way
+// production traffic actually would — many goroutines hitting Lookup and
+// Store simultaneously with a mix of overlapping and distinct requests —
+// rather than the sequential single-goroutine pattern every other test in
+// this file uses. Run under go test -race; the only property under test
+// is "no data race and no panic," not any particular hit/miss outcome.
+func TestSemanticCache_ConcurrentLookupAndStore(t *testing.T) {
+	mem := NewMemory(1000, time.Minute)
+	exact := &ExactCache{mem}
+	backend := NewMemorySemanticBackend(1000)
+	sc := NewSemanticCache(exact, backend, WordVectorizer{}, 0.92)
+	ctx := context.Background()
+
+	const goroutines = 50
+	const opsPerGoroutine = 40
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < opsPerGoroutine; i++ {
+				topic := (g + i) % 5 // overlapping topics across goroutines, so Lookup sometimes hits
+				req := makeReq("gpt-4o", "question about topic number "+string(rune('A'+topic)))
+				if _, _, ok := sc.Lookup(ctx, req); !ok {
+					sc.Store(ctx, req, makeResp("resp"), time.Minute)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
 }
 
 func TestCacheHit_String(t *testing.T) {
