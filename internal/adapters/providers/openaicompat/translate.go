@@ -16,13 +16,28 @@ type wireRequest struct {
 
 // wireMessage's tool fields reuse schema.ToolCall directly: the OpenAI wire
 // format for tool_calls (id/type/function.name/function.arguments) is
-// exactly what pkg/schema already models.
+// exactly what pkg/schema already models. Content is `any` since the wire
+// format is polymorphic (string or content-part array); schema.ContentPart
+// matches the array shape exactly, so it round-trips with no translation.
 type wireMessage struct {
 	Role       string            `json:"role"`
-	Content    string            `json:"content,omitempty"`
+	Content    any               `json:"content,omitempty"`
 	ToolCalls  []schema.ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string            `json:"tool_call_id,omitempty"`
 	Name       string            `json:"name,omitempty"`
+}
+
+// toWireContent picks the multimodal array shape when the message has
+// content parts, otherwise the plain string (or nil, so omitempty drops it
+// for assistant messages that only carry tool_calls).
+func toWireContent(m schema.Message) any {
+	if len(m.Parts) > 0 {
+		return m.Parts
+	}
+	if m.Content == "" {
+		return nil
+	}
+	return m.Content
 }
 
 type wireResponse struct {
@@ -93,7 +108,7 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	for i, m := range req.Messages {
 		msgs[i] = wireMessage{
 			Role:       m.Role,
-			Content:    m.Content,
+			Content:    toWireContent(m),
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -110,11 +125,12 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 func fromWireResponse(wr *wireResponse) *schema.ResponseEnvelope {
 	choices := make([]schema.Choice, len(wr.Choices))
 	for i, c := range wr.Choices {
+		content, _ := c.Message.Content.(string)
 		choices[i] = schema.Choice{
 			Index: c.Index,
 			Message: schema.Message{
 				Role:      c.Message.Role,
-				Content:   c.Message.Content,
+				Content:   content,
 				ToolCalls: c.Message.ToolCalls,
 			},
 			FinishReason: c.FinishReason,

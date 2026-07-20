@@ -55,6 +55,38 @@ func TestToWireRequest(t *testing.T) {
 	}
 }
 
+func TestToWireRequest_MultimodalContent(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "gpt-4o",
+		Messages: []schema.Message{
+			{Role: "user", Parts: []schema.ContentPart{
+				{Type: "text", Text: "what is this?"},
+				{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "https://example.com/cat.png", Detail: "high"}},
+			}},
+		},
+	}
+	got := toWireRequest(req)
+
+	parts, ok := got.Messages[0].Content.([]schema.ContentPart)
+	if !ok {
+		t.Fatalf("content: got %T, want []schema.ContentPart", got.Messages[0].Content)
+	}
+	if len(parts) != 2 || parts[1].ImageURL.URL != "https://example.com/cat.png" || parts[1].ImageURL.Detail != "high" {
+		t.Errorf("parts: got %+v", parts)
+	}
+}
+
+func TestToWireRequest_PlainTextContentStillString(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model:    "gpt-4o",
+		Messages: []schema.Message{{Role: "user", Content: "hello"}},
+	}
+	got := toWireRequest(req)
+	if got.Messages[0].Content != "hello" {
+		t.Errorf("content: got %v (%T), want plain string \"hello\"", got.Messages[0].Content, got.Messages[0].Content)
+	}
+}
+
 func TestToWireRequest_ToolsAndToolCalls(t *testing.T) {
 	req := &schema.RequestEnvelope{
 		Model: "gpt-4o",

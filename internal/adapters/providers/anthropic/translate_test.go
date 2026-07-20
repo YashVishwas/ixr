@@ -49,6 +49,70 @@ func TestToWireRequest_NoSystem(t *testing.T) {
 	}
 }
 
+func TestToWireRequest_MultimodalDataURI(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "claude-sonnet-4-6",
+		Messages: []schema.Message{
+			{Role: "user", Parts: []schema.ContentPart{
+				{Type: "text", Text: "what is this?"},
+				{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "data:image/png;base64,AAAABBBB"}},
+			}},
+		},
+	}
+
+	got := toWireRequest(req)
+
+	if len(got.Messages) != 1 {
+		t.Fatalf("messages: got %d, want 1", len(got.Messages))
+	}
+	blocks := got.Messages[0].Content
+	if len(blocks) != 2 {
+		t.Fatalf("content blocks: got %d, want 2", len(blocks))
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "what is this?" {
+		t.Errorf("text block: got %+v", blocks[0])
+	}
+	if blocks[1].Type != "image" || blocks[1].Source == nil {
+		t.Fatalf("image block: got %+v", blocks[1])
+	}
+	if blocks[1].Source.Type != "base64" || blocks[1].Source.MediaType != "image/png" || blocks[1].Source.Data != "AAAABBBB" {
+		t.Errorf("image source: got %+v", blocks[1].Source)
+	}
+}
+
+func TestToWireRequest_MultimodalHTTPURL(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "claude-sonnet-4-6",
+		Messages: []schema.Message{
+			{Role: "user", Parts: []schema.ContentPart{
+				{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "https://example.com/cat.png"}},
+			}},
+		},
+	}
+
+	got := toWireRequest(req)
+
+	blocks := got.Messages[0].Content
+	if len(blocks) != 1 || blocks[0].Type != "image" || blocks[0].Source == nil {
+		t.Fatalf("image block: got %+v", blocks)
+	}
+	if blocks[0].Source.Type != "url" || blocks[0].Source.URL != "https://example.com/cat.png" {
+		t.Errorf("image source: got %+v, want a url-type source (Anthropic fetches it)", blocks[0].Source)
+	}
+}
+
+func TestToWireRequest_PlainTextMessageStillSingleTextBlock(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model:    "claude-sonnet-4-6",
+		Messages: []schema.Message{{Role: "user", Content: "hello"}},
+	}
+	got := toWireRequest(req)
+	blocks := got.Messages[0].Content
+	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "hello" {
+		t.Errorf("expected unchanged single-text-block shape, got %+v", blocks)
+	}
+}
+
 func TestToWireRequest_Tools(t *testing.T) {
 	req := &schema.RequestEnvelope{
 		Model:    "claude-sonnet-4-6",

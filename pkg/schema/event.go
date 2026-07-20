@@ -91,13 +91,19 @@ type ResponseEnvelope struct {
 	Usage   Usage    `json:"usage"`
 }
 
-// Message is a single turn in a conversation.
+// Message is a single turn in a conversation. Content is the plain-text
+// shape; Parts is populated instead when the caller sent a multi-part
+// "content" array (text + images) — see MarshalJSON/UnmarshalJSON in
+// content.go. A message never has both populated by the unmarshaler,
+// though Content is also flattened from Parts' text blocks for callers
+// that only read Content.
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"` // set on role="tool" messages; identifies which ToolCall this responds to
-	Name       string     `json:"name,omitempty"`         // optional function name on role="tool" messages
+	Role       string        `json:"role"`
+	Content    string        `json:"content,omitempty"`
+	Parts      []ContentPart `json:"-"` // marshaled under "content" instead of Content when non-empty; see content.go
+	ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID string        `json:"tool_call_id,omitempty"` // set on role="tool" messages; identifies which ToolCall this responds to
+	Name       string        `json:"name,omitempty"`         // optional function name on role="tool" messages
 }
 
 // Choice is one completion candidate in the response.

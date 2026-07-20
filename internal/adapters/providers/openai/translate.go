@@ -19,13 +19,30 @@ type wireRequest struct {
 // wireMessage's tool fields reuse schema.ToolCall directly: OpenAI's wire
 // format for tool_calls (id/type/function.name/function.arguments) is
 // exactly what pkg/schema already models, so no separate translation is
-// needed for the non-streaming case.
+// needed for the non-streaming case. Content is `any` because OpenAI's
+// wire format is polymorphic — a plain string for text-only messages, or
+// an array of content parts for multimodal ones — and schema.ContentPart
+// already matches that array shape exactly, so it round-trips with no
+// translation either.
 type wireMessage struct {
 	Role       string            `json:"role"`
-	Content    string            `json:"content,omitempty"`
+	Content    any               `json:"content,omitempty"`
 	ToolCalls  []schema.ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string            `json:"tool_call_id,omitempty"`
 	Name       string            `json:"name,omitempty"`
+}
+
+// toWireContent picks the multimodal array shape when the message has
+// content parts, otherwise the plain string (or nil, so omitempty drops it
+// for assistant messages that only carry tool_calls).
+func toWireContent(m schema.Message) any {
+	if len(m.Parts) > 0 {
+		return m.Parts
+	}
+	if m.Content == "" {
+		return nil
+	}
+	return m.Content
 }
 
 type wireResponse struct {
@@ -90,7 +107,7 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	for i, m := range req.Messages {
 		msgs[i] = wireMessage{
 			Role:       m.Role,
-			Content:    m.Content,
+			Content:    toWireContent(m),
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
@@ -151,11 +168,15 @@ func (a *toolCallAccumulator) finalize() []schema.ToolCall {
 func fromWireResponse(wr *wireResponse) *schema.ResponseEnvelope {
 	choices := make([]schema.Choice, len(wr.Choices))
 	for i, c := range wr.Choices {
+		// Responses are always plain text in practice — OpenAI doesn't
+		// reply with multi-part content — but content is `any` on the
+		// wire type, so assert defensively rather than assume the shape.
+		content, _ := c.Message.Content.(string)
 		choices[i] = schema.Choice{
 			Index: c.Index,
 			Message: schema.Message{
 				Role:      c.Message.Role,
-				Content:   c.Message.Content,
+				Content:   content,
 				ToolCalls: c.Message.ToolCalls,
 			},
 			FinishReason: c.FinishReason,
