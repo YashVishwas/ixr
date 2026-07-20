@@ -480,6 +480,8 @@ Execution: for step *i*, build a request whose messages are the caller's origina
 
 Config loading: `internal/adapters/config/schema.go` gains a `Chains map[string]ChainConfig` section; `pkg/ixr/ixr.go` builds the `chain.Registry` alongside the other registries at startup, same wiring shape as everything else there.
 
+**Chain steps and Gap 5 (context-window escalation) — confirmed as intentional, not a gap.** Each step routes via `routing.RoutingDecision{Model: model}` with no `FallbackChain`, so a context-length error mid-chain has nothing to escalate to and the step fails like any other error, aborting the chain. This is not chain-specific: `FallbackChain` is populated exclusively by `scoring.Engine.Decide` for `model:"auto"` requests — an explicit-model request outside chains has exactly the same limitation. `TestChatHandler_ChainStepContextOverflowAbortsCleanly` locks in that the failure is clean (502, well-formed JSON body, no hang or panic) rather than attempting to fix it, since a real fix would mean designing per-step fallback chains for named chain steps, which is a larger feature than this stress-testing pass warranted.
+
 ---
 
 ### Gap 12 — Bandit Exploration in Primary Auto-Routing

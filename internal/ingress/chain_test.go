@@ -3,6 +3,7 @@ package ingress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,6 +97,45 @@ func TestChatHandler_ChainAbortsOnStepFailure(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("step B calls: got %d, want 0 (chain must abort after step A fails, not skip ahead)", calls)
+	}
+}
+
+// TestChatHandler_ChainStepContextOverflowAbortsCleanly documents an
+// intentional trade-off found while stress-testing chains against Gap 5
+// (automatic context-window escalation): routing.Execute only escalates
+// within a RoutingDecision's FallbackChain, which is populated exclusively
+// by scoring.Engine.Decide for model:"auto" requests. A chain step routes
+// via routing.RoutingDecision{Model: model} with no FallbackChain — the
+// same shape a direct explicit-model request uses — so a context-length
+// error mid-chain has nothing to escalate to and the step just fails, the
+// same as any other step error. This isn't a chain-specific regression,
+// it's parity with how explicit-model requests already behave outside
+// chains; this test locks in that the failure is still clean (a 502, not
+// a hang, panic, or corrupted partial response) rather than fixing it,
+// since "fix" would mean designing per-step fallback chains for chains,
+// which is out of scope here.
+func TestChatHandler_ChainStepContextOverflowAbortsCleanly(t *testing.T) {
+	calls := 0
+	stepA := &stubProvider{name: "provider-a", err: errors.New("400: context_length_exceeded: reduce the length of the messages")}
+	stepB := &stubProvider{name: "provider-b", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		calls++
+		return &schema.ResponseEnvelope{ID: "b1", Choices: []schema.Choice{{}}}, nil
+	}}
+
+	router := multiRouter(map[string]provider.Provider{"model-a": stepA, "model-b": stepB})
+	reg := chain.Registry{"c": chain.Chain{Name: "c", Models: []string{"model-a", "model-b"}, Prompts: []string{"", ""}}}
+	h := NewChatHandler(router, nil, WithChains(reg), WithRetryConfig(fastRetryConfig))
+
+	w := post(h, `{"model":"c","messages":[{"role":"user","content":"a very long message"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status: got %d, want 502 (clean failure, not a hang or panic); body=%s", w.Code, w.Body.String())
+	}
+	if calls != 0 {
+		t.Errorf("step B calls: got %d, want 0 (a context-overflow step has nowhere to escalate to within a chain, so it aborts like any other step failure)", calls)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("response body must still be well-formed JSON, got decode error: %v", err)
 	}
 }
 
