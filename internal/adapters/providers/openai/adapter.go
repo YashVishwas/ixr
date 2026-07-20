@@ -104,6 +104,7 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 		return fmt.Errorf("openai: stream status %d: %s", httpResp.StatusCode, b)
 	}
 
+	toolCalls := newToolCallAccumulator()
 	scanner := bufio.NewScanner(httpResp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -118,7 +119,16 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 		if err := json.Unmarshal([]byte(data), &delta); err != nil {
 			continue
 		}
-		if err := fn(deltaToChunk(&delta)); err != nil {
+		if len(delta.Choices) > 0 {
+			toolCalls.add(delta.Choices[0].Delta.ToolCalls)
+		}
+		chunk := deltaToChunk(&delta)
+		// Tool call arguments arrive fragmented across many chunks; only
+		// the finish chunk carries the fully reassembled calls.
+		if chunk.FinishReason != "" && !toolCalls.empty() {
+			chunk.Delta.ToolCalls = toolCalls.finalize()
+		}
+		if err := fn(chunk); err != nil {
 			return err
 		}
 	}

@@ -10,11 +10,19 @@ type wireRequest struct {
 	MaxTokens   *int          `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	Stream      bool          `json:"stream,omitempty"`
+	Tools       []schema.Tool `json:"tools,omitempty"`
+	ToolChoice  any           `json:"tool_choice,omitempty"`
 }
 
+// wireMessage's tool fields reuse schema.ToolCall directly: the OpenAI wire
+// format for tool_calls (id/type/function.name/function.arguments) is
+// exactly what pkg/schema already models.
 type wireMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content,omitempty"`
+	ToolCalls  []schema.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Name       string            `json:"name,omitempty"`
 }
 
 type wireResponse struct {
@@ -40,10 +48,10 @@ type wireUsage struct {
 
 // wireDeltaResponse is the JSON shape of each SSE chunk from OpenAI-compat APIs.
 type wireDeltaResponse struct {
-	ID      string             `json:"id"`
-	Model   string             `json:"model"`
-	Choices []wireDeltaChoice  `json:"choices"`
-	Usage   *wireDeltaUsage    `json:"usage,omitempty"`
+	ID      string            `json:"id"`
+	Model   string            `json:"model"`
+	Choices []wireDeltaChoice `json:"choices"`
+	Usage   *wireDeltaUsage   `json:"usage,omitempty"`
 }
 
 type wireDeltaChoice struct {
@@ -53,8 +61,25 @@ type wireDeltaChoice struct {
 }
 
 type wireDeltaMessage struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string              `json:"role,omitempty"`
+	Content   string              `json:"content,omitempty"`
+	ToolCalls []wireDeltaToolCall `json:"tool_calls,omitempty"`
+}
+
+// wireDeltaToolCall is a fragment of a tool call spread across multiple SSE
+// chunks. Index identifies which tool call (of possibly several parallel
+// calls) this fragment belongs to; ID/Name arrive once on the first
+// fragment, Arguments arrives incrementally and must be concatenated.
+type wireDeltaToolCall struct {
+	Index    int                   `json:"index"`
+	ID       string                `json:"id,omitempty"`
+	Type     string                `json:"type,omitempty"`
+	Function wireDeltaToolFunction `json:"function,omitempty"`
+}
+
+type wireDeltaToolFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type wireDeltaUsage struct {
@@ -66,17 +91,32 @@ type wireDeltaUsage struct {
 func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	msgs := make([]wireMessage, len(req.Messages))
 	for i, m := range req.Messages {
-		msgs[i] = wireMessage{Role: m.Role, Content: m.Content}
+		msgs[i] = wireMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+		}
 	}
-	return wireRequest{Model: req.Model, Messages: msgs}
+	return wireRequest{
+		Model:      req.Model,
+		Messages:   msgs,
+		Tools:      req.Tools,
+		ToolChoice: req.ToolChoice,
+	}
 }
 
 func fromWireResponse(wr *wireResponse) *schema.ResponseEnvelope {
 	choices := make([]schema.Choice, len(wr.Choices))
 	for i, c := range wr.Choices {
 		choices[i] = schema.Choice{
-			Index:        c.Index,
-			Message:      schema.Message{Role: c.Message.Role, Content: c.Message.Content},
+			Index: c.Index,
+			Message: schema.Message{
+				Role:      c.Message.Role,
+				Content:   c.Message.Content,
+				ToolCalls: c.Message.ToolCalls,
+			},
 			FinishReason: c.FinishReason,
 		}
 	}
@@ -92,4 +132,48 @@ func fromWireResponse(wr *wireResponse) *schema.ResponseEnvelope {
 			TotalTokens:      wr.Usage.TotalTokens,
 		},
 	}
+}
+
+// toolCallAccumulator reassembles tool calls streamed as index-keyed
+// fragments across multiple SSE chunks (id/name arrive once, arguments
+// arrive incrementally) into complete schema.ToolCall values, preserving
+// the order tool calls first appeared in.
+type toolCallAccumulator struct {
+	byIndex map[int]*schema.ToolCall
+	order   []int
+}
+
+func newToolCallAccumulator() *toolCallAccumulator {
+	return &toolCallAccumulator{byIndex: map[int]*schema.ToolCall{}}
+}
+
+func (a *toolCallAccumulator) add(fragments []wireDeltaToolCall) {
+	for _, f := range fragments {
+		tc, ok := a.byIndex[f.Index]
+		if !ok {
+			tc = &schema.ToolCall{}
+			a.byIndex[f.Index] = tc
+			a.order = append(a.order, f.Index)
+		}
+		if f.ID != "" {
+			tc.ID = f.ID
+		}
+		if f.Type != "" {
+			tc.Type = f.Type
+		}
+		if f.Function.Name != "" {
+			tc.Function.Name = f.Function.Name
+		}
+		tc.Function.Arguments += f.Function.Arguments
+	}
+}
+
+func (a *toolCallAccumulator) empty() bool { return len(a.order) == 0 }
+
+func (a *toolCallAccumulator) finalize() []schema.ToolCall {
+	out := make([]schema.ToolCall, 0, len(a.order))
+	for _, idx := range a.order {
+		out = append(out, *a.byIndex[idx])
+	}
+	return out
 }

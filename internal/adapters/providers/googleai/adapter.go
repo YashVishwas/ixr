@@ -147,7 +147,10 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 			continue
 		}
 		c0 := wr.Candidates[0]
-		text, _ := extractText(c0.Content.Parts)
+		// Gemini streams complete GenerateContentResponse objects per chunk
+		// (not fragments), so a functionCall part is already whole here —
+		// no cross-chunk accumulation needed, unlike OpenAI/Anthropic.
+		text, calls := splitParts(c0.Content.Parts)
 
 		u := schema.Usage{
 			PromptTokens:     wr.UsageMetadata.PromptTokenCount,
@@ -159,10 +162,14 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 			usagePtr = &u
 		}
 
+		finish := mapFinishReason(c0.FinishReason)
+		if len(calls) > 0 {
+			finish = "tool_calls"
+		}
 		chunk := provider.StreamChunk{
 			Model:        req.Model,
-			Delta:        schema.Message{Role: "assistant", Content: text},
-			FinishReason: mapFinishReason(c0.FinishReason),
+			Delta:        schema.Message{Role: "assistant", Content: text, ToolCalls: calls},
+			FinishReason: finish,
 			Usage:        usagePtr,
 		}
 		if err := fn(chunk); err != nil {
