@@ -99,7 +99,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Model == "auto" {
+	autoRouted := req.Model == "auto"
+	if autoRouted {
 		hint := taskHintFromHeaders(r, &req)
 		if h.engine != nil {
 			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
@@ -125,7 +126,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		h.handleStream(w, r, p, &req)
+		h.handleStream(w, r, p, &req, autoRouted)
 		return
 	}
 
@@ -159,15 +160,16 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
-			Timestamp: start,
-			Provider:  p.Name(),
-			Model:     req.Model,
-			Latency:   schema.EventLatency(latency),
-			Request:   req,
-			UseCaseID: r.Header.Get("X-IXR-UseCase"),
-			TenantID:  id.TenantID,
-			TeamID:    id.TeamID,
-			UserID:    id.UserID,
+			Timestamp:  start,
+			Provider:   p.Name(),
+			Model:      req.Model,
+			Latency:    schema.EventLatency(latency),
+			Request:    req,
+			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
+			TenantID:   id.TenantID,
+			TeamID:     id.TeamID,
+			UserID:     id.UserID,
+			AutoRouted: autoRouted,
 		}
 		if err != nil {
 			ev.Error = err.Error()
@@ -203,7 +205,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope) {
+func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope, autoRouted bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_error", "server does not support streaming")
@@ -252,17 +254,18 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
-			Timestamp: start,
-			Provider:  p.Name(),
-			Model:     req.Model,
-			Latency:   schema.EventLatency(streamLatency),
-			Request:   *req,
-			UseCaseID: r.Header.Get("X-IXR-UseCase"),
-			TenantID:  id.TenantID,
-			TeamID:    id.TeamID,
-			UserID:    id.UserID,
-			TokensIn:  totalIn,
-			TokensOut: totalOut,
+			Timestamp:  start,
+			Provider:   p.Name(),
+			Model:      req.Model,
+			Latency:    schema.EventLatency(streamLatency),
+			Request:    *req,
+			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
+			TenantID:   id.TenantID,
+			TeamID:     id.TeamID,
+			UserID:     id.UserID,
+			TokensIn:   totalIn,
+			TokensOut:  totalOut,
+			AutoRouted: autoRouted,
 			Streaming: true,
 		}
 		if streamErr != nil {

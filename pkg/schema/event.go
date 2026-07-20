@@ -49,6 +49,10 @@ type CallEvent struct {
 	Error     string           `json:"error,omitempty"`
 	Streaming bool             `json:"streaming,omitempty"`
 	Shadow    *ShadowMetadata  `json:"shadow,omitempty"`
+	// AutoRouted marks a call that arrived via model:"auto" — the bandit
+	// reward plugin (RFC Gap 12) only trains on these; a caller who named a
+	// model explicitly didn't opt into exploration.
+	AutoRouted bool `json:"auto_routed,omitempty"`
 }
 
 // ShadowMetadata is attached to CallEvents emitted for shadow-routed requests.

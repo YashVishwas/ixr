@@ -19,6 +19,7 @@ import (
 	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
+	"github.com/YashVishwas/ixr/plugins/banditreward"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
@@ -157,6 +158,16 @@ func Start(opts ...Option) error {
 	// --- Adaptive routing ---
 	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
 	shadowOrch := scoring.NewOrchestrator(perfStore, scoring.DefaultRewardWeights, bandit)
+
+	// Bandit-driven primary auto-routing (RFC Gap 12) — opt-in and off by
+	// default, so model:"auto" stays fully deterministic (and existing
+	// deployments see no behavior change) unless explicitly enabled. Shares
+	// the same bandit instance as shadow routing above, so exploration and
+	// reward from both paths reinforce one set of arm statistics.
+	if os.Getenv("IXR_AUTO_BANDIT") == "true" {
+		scoringEngine.SetBandit(bandit)
+		mgr.Register(banditreward.New(bandit))
+	}
 
 	// --- Semantic cache ---
 	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
