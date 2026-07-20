@@ -173,7 +173,15 @@ func Start(opts ...Option) error {
 	// --- Semantic cache ---
 	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
-	responseCache := cache.NewMemory(cacheSize, cacheTTL)
+	exactCache := &cache.ExactCache{Memory: cache.NewMemory(cacheSize, cacheTTL)}
+
+	var responseCache cache.RequestAwareCache = exactCache
+	if os.Getenv("IXR_SEMANTIC_CACHE") == "true" {
+		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
+		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
+		defer semanticBackend.Close()
+		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+	}
 
 	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
 	// parallel-panel-plus-judge, matching OmniRoute's fusion/pipeline
@@ -345,6 +353,15 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def
