@@ -320,15 +320,18 @@ func Catalog() []ModelCard {
 	return out
 }
 
-// Lookup returns the ModelCard for the given model ID, or false if the
-// model has no pricing entry in the catalog.
+// Lookup returns pricing for the given model ID, or false if the model has
+// no pricing entry anywhere. Checks the curated auto-routing catalog first
+// (its capability priors are a superset of what's needed here), then falls
+// back to pricingTable, which covers real by-name-requested models that
+// aren't auto-routing candidates.
 func Lookup(model string) (ModelCard, bool) {
 	for _, m := range catalog {
 		if m.ID == model {
 			return m, true
 		}
 	}
-	return ModelCard{}, false
+	return lookupPricingTable(model)
 }
 
 // InputShare converts a prompt character count to the estimated fraction of tokens
