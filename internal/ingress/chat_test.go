@@ -253,7 +253,11 @@ func TestChatHandler_UnpricedModelYieldsZeroCost(t *testing.T) {
 		},
 	}
 	h := NewChatHandler(fixedRouter(p), fakeBus)
-	w := post(h, `{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"hi"}]}`)
+	// A genuinely uncatalogued model name — llama-3.1-8b-instant used to
+	// serve this role until it got a real pricingTable entry (see
+	// internal/domain/routing/pricing.go), which is exactly the bug this
+	// test now guards against regressing the other way.
+	w := post(h, `{"model":"totally-fictional-model-not-in-any-catalog","messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", w.Code)
 	}
