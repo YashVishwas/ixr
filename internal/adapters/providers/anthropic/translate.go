@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -29,17 +30,27 @@ type wireMessage struct {
 
 // wireContent is Anthropic's single content-block shape, reused across
 // requests and responses: "text" (Text), "tool_use" (ID/Name/Input, emitted
-// by the model), and "tool_result" (ToolUseID/Content, sent back to the
-// model as the outcome of a tool call).
+// by the model), "tool_result" (ToolUseID/Content, sent back to the model
+// as the outcome of a tool call), and "image" (Source, sent to the model).
 type wireContent struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
+	Type      string           `json:"type"`
+	Text      string           `json:"text,omitempty"`
+	ID        string           `json:"id,omitempty"`
+	Name      string           `json:"name,omitempty"`
+	Input     map[string]any   `json:"input,omitempty"`
+	ToolUseID string           `json:"tool_use_id,omitempty"`
+	Content   string           `json:"content,omitempty"`
+	IsError   bool             `json:"is_error,omitempty"`
+	Source    *wireImageSource `json:"source,omitempty"`
+}
+
+// wireImageSource is Anthropic's image content-block source: either
+// inline base64 bytes or a URL Anthropic fetches itself.
+type wireImageSource struct {
+	Type      string `json:"type"` // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 // wireTool is Anthropic's native tool definition shape — flat, unlike
@@ -180,7 +191,7 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 
 		msgs = append(msgs, wireMessage{
 			Role:    m.Role,
-			Content: []wireContent{{Type: "text", Text: m.Content}},
+			Content: toWireContentBlocks(m),
 		})
 	}
 	flushResults()
@@ -193,6 +204,54 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 		Tools:      toWireTools(req.Tools),
 		ToolChoice: toWireToolChoice(req.ToolChoice),
 	}
+}
+
+// toWireContentBlocks converts a message's content into Anthropic content
+// blocks: a single text block for a plain-text message (today's shape,
+// unchanged), or one block per part for a multimodal message.
+func toWireContentBlocks(m schema.Message) []wireContent {
+	if len(m.Parts) == 0 {
+		return []wireContent{{Type: "text", Text: m.Content}}
+	}
+	blocks := make([]wireContent, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		switch p.Type {
+		case "text":
+			blocks = append(blocks, wireContent{Type: "text", Text: p.Text})
+		case "image_url":
+			if p.ImageURL != nil {
+				blocks = append(blocks, toImageBlock(p.ImageURL.URL))
+			}
+		}
+	}
+	return blocks
+}
+
+// toImageBlock builds an Anthropic image content block from an image_url
+// part's URL: a data: URI decodes into an inline base64 source (media type
+// + payload extracted directly, no re-encoding); any other URL is passed
+// as a "url" source, which Anthropic fetches itself.
+func toImageBlock(url string) wireContent {
+	if mediaType, data, ok := parseDataURI(url); ok {
+		return wireContent{Type: "image", Source: &wireImageSource{Type: "base64", MediaType: mediaType, Data: data}}
+	}
+	return wireContent{Type: "image", Source: &wireImageSource{Type: "url", URL: url}}
+}
+
+// parseDataURI extracts the media type and base64 payload from a
+// "data:image/png;base64,AAAA..." URI.
+func parseDataURI(uri string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", false
+	}
+	rest := uri[len(prefix):]
+	const marker = ";base64,"
+	idx := strings.Index(rest, marker)
+	if idx < 0 {
+		return "", "", false
+	}
+	return rest[:idx], rest[idx+len(marker):], true
 }
 
 func toWireTools(tools []schema.Tool) []wireTool {
