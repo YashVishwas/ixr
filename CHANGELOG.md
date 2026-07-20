@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Fusion chain strategy (RFC Gap 11 extension) and progressive bandit
+  cooldown (RFC Gap 12 extension): the two remaining pieces of the OmniRoute
+  parity gaps this RFC calls out by name — "18 named routing strategies
+  including a bandit-driven auto-combo engine with progressive cooldown"
+  and fusion/pipeline routing strategies. `chain.Chain` gains a `Strategy`
+  field (`"sequential"` default, or `"fusion"`: panel models run in
+  parallel against the original messages, then a `Judge` model synthesizes
+  their answers; a single panel member failing doesn't abort the request,
+  only an all-panel failure does). `EpsilonGreedy`/`UCB` exclude an arm
+  from `Select` after 3 consecutive failures for a backoff window that
+  doubles per additional failure (capped at 5 minutes); a success clears
+  it immediately; if every candidate is cooling down, `Select` falls back
+  to the full list rather than starving routing (`internal/domain/scoring/bandit.go`).
+  See `docs/rfc/0001-semantic-cache.md` Gap 12 for the reward-threshold
+  coupling this relies on.
 - Tool/function calling wired through every configured adapter: OpenAI and
   Anthropic directly, Cerebras/DeepSeek/GitHub Models/Llama/Mistral/
   OpenRouter/SambaNova/Zhipu/Ollama/llama.cpp/local via the shared
@@ -65,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- `chains:` requests ignored `stream:true` and always returned a plain JSON
+  body instead of SSE: `chat.go` dispatched to `handleChain` before the
+  `req.Stream` check ever ran. The terminal call in a chain (last
+  sequential step, or the fusion judge) now streams when requested.
 - Streaming was broken for every request, not just rate-limited ones:
   `internal/ingress/ratelimit.go`'s `responseCapture` wrapped every response
   in a struct that didn't forward `http.Flusher`, and rate-limit middleware
