@@ -175,17 +175,13 @@ func Start(opts ...Option) error {
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
 	responseCache := cache.NewMemory(cacheSize, cacheTTL)
 
-	// --- Model chains (RFC Gap 11) ---
-	chainDefs := make(map[string]struct {
-		Models  []string
-		Prompts []string
-	})
+	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
+	// parallel-panel-plus-judge, matching OmniRoute's fusion/pipeline
+	// routing strategies) ---
+	chainDefs := make(map[string]chain.Def)
 	if fileCfg != nil {
 		for name, c := range fileCfg.Chains {
-			chainDefs[name] = struct {
-				Models  []string
-				Prompts []string
-			}{Models: c.Models, Prompts: c.Prompts}
+			chainDefs[name] = chain.Def{Strategy: c.Strategy, Models: c.Models, Prompts: c.Prompts, Judge: c.Judge}
 		}
 	}
 	chainRegistry, err := chain.BuildRegistry(chainDefs)

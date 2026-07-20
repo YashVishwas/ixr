@@ -21,10 +21,11 @@ import (
 
 // stubProvider is a minimal provider.Provider for testing.
 type stubProvider struct {
-	name string
-	resp *schema.ResponseEnvelope
-	err  error
-	chat func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error)
+	name   string
+	resp   *schema.ResponseEnvelope
+	err    error
+	chat   func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error)
+	stream func(context.Context, *schema.RequestEnvelope, func(provider.StreamChunk) error) error
 }
 
 func (s *stubProvider) Name() string { return s.name }
@@ -34,7 +35,10 @@ func (s *stubProvider) Chat(ctx context.Context, req *schema.RequestEnvelope) (*
 	}
 	return s.resp, s.err
 }
-func (s *stubProvider) Stream(_ context.Context, _ *schema.RequestEnvelope, _ func(provider.StreamChunk) error) error {
+func (s *stubProvider) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
+	if s.stream != nil {
+		return s.stream(ctx, req, fn)
+	}
 	return s.err
 }
 

@@ -154,3 +154,155 @@ func TestChatHandler_ChainRespectsCircuitBreakerPerStep(t *testing.T) {
 		t.Errorf("step calls: got %d, want 0 (breaker should short-circuit before calling the provider)", calls)
 	}
 }
+
+// TestChatHandler_ChainStreamsFinalStep locks in a fix for a bug found via
+// dogfooding: a stream:true request against a chains: model used to be
+// dispatched to handleChain before ServeHTTP's req.Stream check ever ran,
+// so the client always got a plain JSON body back regardless of what it
+// asked for — silently breaking any SDK expecting SSE. The final step must
+// now honour req.Stream.
+func TestChatHandler_ChainStreamsFinalStep(t *testing.T) {
+	stepA := &stubProvider{name: "provider-a", resp: &schema.ResponseEnvelope{ID: "a1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "draft answer"}}}}}
+	stepB := &stubProvider{name: "provider-b", stream: func(_ context.Context, _ *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
+		if err := fn(provider.StreamChunk{ID: "b1", Delta: schema.Message{Content: "refined "}}); err != nil {
+			return err
+		}
+		return fn(provider.StreamChunk{ID: "b1", Delta: schema.Message{Content: "answer"}, Usage: &schema.Usage{PromptTokens: 3, CompletionTokens: 2}})
+	}}
+
+	router := multiRouter(map[string]provider.Provider{"model-a": stepA, "model-b": stepB})
+	reg := chain.Registry{"fast-refine": chain.Chain{
+		Name:    "fast-refine",
+		Models:  []string{"model-a", "model-b"},
+		Prompts: []string{"", "Improve the previous answer."},
+	}}
+	h := NewChatHandler(router, nil, WithChains(reg))
+
+	w := post(h, `{"model":"fast-refine","stream":true,"messages":[{"role":"user","content":"what is a monad?"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("content-type: got %q, want text/event-stream — chain must honour stream:true", ct)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "refined") || !strings.Contains(body, "answer") {
+		t.Errorf("body should contain the streamed final-step deltas, got %q", body)
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Errorf("body should contain [DONE], got %q", body)
+	}
+}
+
+// TestChatHandler_FusionRunsPanelInParallelThenJudge verifies the fusion
+// strategy: all panel models are called with the caller's original
+// messages (not each other's output, unlike sequential), and the judge
+// model receives all of their answers to synthesize a final one.
+func TestChatHandler_FusionRunsPanelInParallelThenJudge(t *testing.T) {
+	var judgePrompt string
+
+	panelA := &stubProvider{name: "provider-a", resp: &schema.ResponseEnvelope{ID: "a1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "answer from A"}}}}}
+	panelB := &stubProvider{name: "provider-b", resp: &schema.ResponseEnvelope{ID: "b1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "answer from B"}}}}}
+	judge := &stubProvider{name: "provider-judge", chat: func(_ context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		var b strings.Builder
+		for _, m := range req.Messages {
+			b.WriteString(m.Role + ":" + m.Content + "|")
+		}
+		judgePrompt = b.String()
+		return &schema.ResponseEnvelope{ID: "j1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "synthesized answer"}}}}, nil
+	}}
+
+	router := multiRouter(map[string]provider.Provider{"model-a": panelA, "model-b": panelB, "model-judge": judge})
+	reg := chain.Registry{"debate": chain.Chain{
+		Name:     "debate",
+		Strategy: chain.StrategyFusion,
+		Models:   []string{"model-a", "model-b"},
+		Judge:    "model-judge",
+	}}
+	h := NewChatHandler(router, nil, WithChains(reg))
+
+	w := post(h, `{"model":"debate","messages":[{"role":"user","content":"what is a monad?"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var resp schema.ResponseEnvelope
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "synthesized answer" {
+		t.Errorf("final content: got %q, want the judge's synthesis", resp.Choices[0].Message.Content)
+	}
+	if resp.Model != "debate" {
+		t.Errorf("response model: got %q, want the chain name", resp.Model)
+	}
+	if !strings.Contains(judgePrompt, "user:what is a monad?") {
+		t.Errorf("judge should see the caller's original message, got %q", judgePrompt)
+	}
+	if !strings.Contains(judgePrompt, "answer from A") || !strings.Contains(judgePrompt, "answer from B") {
+		t.Errorf("judge should see both panel answers, got %q", judgePrompt)
+	}
+}
+
+// TestChatHandler_FusionSurvivesPartialPanelFailure verifies fusion's
+// resilience advantage over sequential chains: a single panel member
+// failing does not abort the request (unlike a sequential step failure) —
+// the judge synthesizes from whichever panel members succeeded.
+func TestChatHandler_FusionSurvivesPartialPanelFailure(t *testing.T) {
+	panelA := &stubProvider{name: "provider-a", err: context.DeadlineExceeded}
+	panelB := &stubProvider{name: "provider-b", resp: &schema.ResponseEnvelope{ID: "b1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "answer from B"}}}}}
+	judge := &stubProvider{name: "provider-judge", resp: &schema.ResponseEnvelope{ID: "j1", Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "synthesized from B alone"}}}}}
+
+	router := multiRouter(map[string]provider.Provider{"model-a": panelA, "model-b": panelB, "model-judge": judge})
+	reg := chain.Registry{"debate": chain.Chain{
+		Name:     "debate",
+		Strategy: chain.StrategyFusion,
+		Models:   []string{"model-a", "model-b"},
+		Judge:    "model-judge",
+	}}
+	h := NewChatHandler(router, nil, WithChains(reg), WithRetryConfig(fastRetryConfig))
+
+	w := post(h, `{"model":"debate","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (partial panel failure should not abort fusion); body=%s", w.Code, w.Body.String())
+	}
+	var resp schema.ResponseEnvelope
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "synthesized from B alone" {
+		t.Errorf("final content: got %q, want the judge's synthesis", resp.Choices[0].Message.Content)
+	}
+}
+
+// TestChatHandler_FusionFailsWhenWholePanelFails verifies fusion still has
+// a terminal failure mode: if every panel member fails, there is nothing
+// for the judge to synthesize from, so the request must fail rather than
+// call the judge with an empty candidate list.
+func TestChatHandler_FusionFailsWhenWholePanelFails(t *testing.T) {
+	panelA := &stubProvider{name: "provider-a", err: context.DeadlineExceeded}
+	panelB := &stubProvider{name: "provider-b", err: context.DeadlineExceeded}
+	judgeCalls := 0
+	judge := &stubProvider{name: "provider-judge", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		judgeCalls++
+		return &schema.ResponseEnvelope{ID: "j1", Choices: []schema.Choice{{}}}, nil
+	}}
+
+	router := multiRouter(map[string]provider.Provider{"model-a": panelA, "model-b": panelB, "model-judge": judge})
+	reg := chain.Registry{"debate": chain.Chain{
+		Name:     "debate",
+		Strategy: chain.StrategyFusion,
+		Models:   []string{"model-a", "model-b"},
+		Judge:    "model-judge",
+	}}
+	h := NewChatHandler(router, nil, WithChains(reg), WithRetryConfig(fastRetryConfig))
+
+	w := post(h, `{"model":"debate","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status: got %d, want 502", w.Code)
+	}
+	if judgeCalls != 0 {
+		t.Errorf("judge calls: got %d, want 0 (judge must not run with an empty candidate list)", judgeCalls)
+	}
+}
