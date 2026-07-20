@@ -20,6 +20,7 @@ type Engine struct {
 	perfStore   store.ModelPerfStore
 	policyStore store.PolicyStore
 	catalog     []routing.ModelCard
+	bandit      Bandit
 }
 
 // NewEngine creates a scoring engine backed by the given stores and model catalog.
@@ -27,6 +28,13 @@ type Engine struct {
 func NewEngine(perf store.ModelPerfStore, policy store.PolicyStore, catalog []routing.ModelCard) *Engine {
 	return &Engine{perfStore: perf, policyStore: policy, catalog: catalog}
 }
+
+// SetBandit enables bandit-driven exploration for model:"auto" decisions
+// (RFC Gap 12): Decide picks the primary model via bandit.Select instead of
+// always taking the top deterministic score. Nil (the default — SetBandit
+// never called) keeps Decide fully deterministic, unchanged from before
+// this existed.
+func (e *Engine) SetBandit(b Bandit) { e.bandit = b }
 
 // Decide selects the best model for hint, using live stats and policy weights.
 // cb may be nil (circuit breaker filtering is skipped when nil).
@@ -58,6 +66,11 @@ func (e *Engine) Decide(ctx context.Context, hint routing.TaskHint, cb *circuitb
 	})
 
 	primary := candidates[0].Model
+	if e.bandit != nil {
+		if picked := e.bandit.Select(candidates); picked != "" {
+			primary = picked
+		}
+	}
 	return routing.RoutingDecision{
 		Model:         primary,
 		FallbackChain: routing.BuildFallbackChain(candidates, primary, 2),

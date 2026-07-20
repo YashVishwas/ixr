@@ -51,3 +51,43 @@ func TestEngineDecideErrorsOnEmptyCatalog(t *testing.T) {
 		t.Fatal("expected error for empty catalog")
 	}
 }
+
+// stubBandit always selects a fixed model, regardless of candidate scores —
+// lets the test assert Decide actually defers to the bandit rather than
+// silently ignoring it.
+type stubBandit struct{ pick string }
+
+func (s stubBandit) Select(_ []routing.Candidate) string { return s.pick }
+func (s stubBandit) Update(_ string, _ float64)          {}
+func (s stubBandit) Regret() *RegretTracker              { return &RegretTracker{} }
+
+func TestEngineDecide_WithoutBandit_StaysFullyDeterministic(t *testing.T) {
+	cat := []routing.ModelCard{
+		{ID: "best", InputUSDPer1M: 0.1, OutputUSDPer1M: 0.1, LatencySec: 0.1, FailureRate: 0.0},
+		{ID: "worst", InputUSDPer1M: 5.0, OutputUSDPer1M: 5.0, LatencySec: 10.0, FailureRate: 0.2},
+	}
+	eng := NewEngine(stubPerfStore{}, stubPolicyStore{}, cat)
+	// Called twice — same deterministic pick both times, no bandit configured.
+	d1, _ := eng.Decide(context.Background(), routing.TaskHint{}, nil)
+	d2, _ := eng.Decide(context.Background(), routing.TaskHint{}, nil)
+	if d1.Model != "best" || d2.Model != "best" {
+		t.Fatalf("expected deterministic pick of the top-scored model both times, got %q then %q", d1.Model, d2.Model)
+	}
+}
+
+func TestEngineDecide_WithBandit_DefersToBanditSelection(t *testing.T) {
+	cat := []routing.ModelCard{
+		{ID: "best", InputUSDPer1M: 0.1, OutputUSDPer1M: 0.1, LatencySec: 0.1, FailureRate: 0.0},
+		{ID: "underdog", InputUSDPer1M: 5.0, OutputUSDPer1M: 5.0, LatencySec: 10.0, FailureRate: 0.2},
+	}
+	eng := NewEngine(stubPerfStore{}, stubPolicyStore{}, cat)
+	eng.SetBandit(stubBandit{pick: "underdog"})
+
+	decision, err := eng.Decide(context.Background(), routing.TaskHint{}, nil)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Model != "underdog" {
+		t.Errorf("model: got %q, want %q (bandit's pick, not the deterministic top score)", decision.Model, "underdog")
+	}
+}
