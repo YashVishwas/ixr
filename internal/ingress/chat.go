@@ -129,9 +129,20 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.cbRegistry != nil && !h.cbRegistry.IsAllowed(req.Model) {
+		writeError(w, http.StatusServiceUnavailable, "circuit_open", "model temporarily unavailable (circuit breaker open)")
+		return
+	}
+
 	start := time.Now()
-	resp, err := p.Chat(r.Context(), reasoning.AdjustTokenBudget(&req))
+	decision := routing.RoutingDecision{Model: req.Model}
+	result, err := routing.Execute(r.Context(), decision, reasoning.AdjustTokenBudget(&req), routing.ProviderLookup(h.router), h.retryCfg)
+	resp := result.Response
 	latency := time.Since(start)
+
+	if h.cbRegistry != nil {
+		h.cbRegistry.RecordOutcome(req.Model, err == nil)
+	}
 
 	if h.metrics != nil {
 		status := http.StatusOK
@@ -199,12 +210,18 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		return
 	}
 
+	if h.cbRegistry != nil && !h.cbRegistry.IsAllowed(req.Model) {
+		writeError(w, http.StatusServiceUnavailable, "circuit_open", "model temporarily unavailable (circuit breaker open)")
+		return
+	}
+
 	writeSSEHeader(w)
 
 	var totalIn, totalOut int
 	start := time.Now()
 
-	streamErr := p.Stream(r.Context(), reasoning.AdjustTokenBudget(req), func(chunk provider.StreamChunk) error {
+	decision := routing.RoutingDecision{Model: req.Model}
+	_, streamErr := routing.ExecuteStream(r.Context(), decision, reasoning.AdjustTokenBudget(req), routing.ProviderLookup(h.router), h.retryCfg, func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
@@ -215,6 +232,10 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		flusher.Flush()
 		return nil
 	})
+
+	if h.cbRegistry != nil {
+		h.cbRegistry.RecordOutcome(req.Model, streamErr == nil)
+	}
 
 	writeSSEDone(w)
 	flusher.Flush()

@@ -156,16 +156,27 @@ func chatWithRetry(ctx context.Context, p provider.Provider, req *schema.Request
 	return nil, cfg.MaxAttempts, lastErr
 }
 
+// streamWithRetry retries a failed stream only if it failed before emitting
+// any chunk to the caller. Once fn has been called even once, the caller
+// (typically an HTTP response writer) has already sent bytes downstream —
+// retrying at that point would replay the response from the beginning and
+// duplicate/corrupt whatever the client already received. So a failure
+// after partial output ends the attempt loop immediately instead of
+// retrying, same as a context cancellation.
 func streamWithRetry(ctx context.Context, p provider.Provider, req *schema.RequestEnvelope, cfg RetryConfig, fn func(provider.StreamChunk) error) (int, error) {
 	backoff := cfg.InitialBackoff
 	var lastErr error
 	for i := 0; i < cfg.MaxAttempts; i++ {
-		err := p.Stream(ctx, req, fn)
+		wrote := false
+		err := p.Stream(ctx, req, func(chunk provider.StreamChunk) error {
+			wrote = true
+			return fn(chunk)
+		})
 		if err == nil {
 			return i + 1, nil
 		}
 		lastErr = err
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isClientError(err) {
+		if wrote || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isClientError(err) {
 			return i + 1, err
 		}
 		if i < cfg.MaxAttempts-1 {

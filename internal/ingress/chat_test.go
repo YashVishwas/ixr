@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
+	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/pkg/plugin"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -107,6 +109,85 @@ func TestChatHandler_ProviderError(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status: got %d, want 502", w.Code)
 	}
+}
+
+// TestChatHandler_RetriesTransientProviderErrors locks in the fix for a bug
+// where routing.Execute (retry + fallback + circuit breaker) was fully
+// built and tested but never called from ServeHTTP — every request bypassed
+// it entirely via a single bare p.Chat() call, so a transient failure never
+// got a second attempt.
+func TestChatHandler_RetriesTransientProviderErrors(t *testing.T) {
+	calls := 0
+	p := &stubProvider{name: "test", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		calls++
+		if calls < 3 {
+			return nil, fmt.Errorf("connection refused")
+		}
+		return &schema.ResponseEnvelope{ID: "ok", Choices: []schema.Choice{{}}}, nil
+	}}
+	h := NewChatHandler(fixedRouter(p), nil, WithRetryConfig(fastRetryConfig))
+	w := post(h, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if calls != 3 {
+		t.Errorf("provider calls: got %d, want 3 (2 failures + 1 success)", calls)
+	}
+}
+
+// TestChatHandler_SkipsRetryOn4xx confirms a client error still fails fast
+// (one attempt) rather than burning the retry budget on a request that will
+// never succeed.
+func TestChatHandler_SkipsRetryOn4xx(t *testing.T) {
+	calls := 0
+	p := &stubProvider{name: "test", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		calls++
+		return nil, fmt.Errorf("test: status 401: unauthorized")
+	}}
+	h := NewChatHandler(fixedRouter(p), nil, WithRetryConfig(fastRetryConfig))
+	w := post(h, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status: got %d, want 502", w.Code)
+	}
+	if calls != 1 {
+		t.Errorf("provider calls: got %d, want 1 (4xx must not retry)", calls)
+	}
+}
+
+// TestChatHandler_CircuitBreakerBlocksDirectModelRequest confirms an open
+// breaker short-circuits a direct "model": request before it ever reaches
+// the provider — previously the breaker was only consulted for model:"auto"
+// candidate filtering, never for a request naming a model directly.
+func TestChatHandler_CircuitBreakerBlocksDirectModelRequest(t *testing.T) {
+	cb := circuitbreaker.NewRegistry(circuitbreaker.Policy{
+		SuccessRateThreshold: 0.90,
+		WindowDuration:       time.Minute,
+		MinRequests:          1,
+		HalfOpenAfter:        time.Hour,
+		ProbeCount:           1,
+	})
+	cb.RecordOutcome("gpt-4o", false) // one failure trips a MinRequests:1 breaker
+
+	calls := 0
+	p := &stubProvider{name: "test", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		calls++
+		return &schema.ResponseEnvelope{ID: "ok", Choices: []schema.Choice{{}}}, nil
+	}}
+	h := NewChatHandler(fixedRouter(p), nil, WithCBRegistry(cb))
+	w := post(h, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+	if calls != 0 {
+		t.Errorf("provider calls: got %d, want 0 (breaker should short-circuit before calling the provider)", calls)
+	}
+}
+
+var fastRetryConfig = routing.RetryConfig{
+	MaxAttempts:    3,
+	InitialBackoff: time.Millisecond,
+	MaxBackoff:     5 * time.Millisecond,
+	BackoffFactor:  2.0,
 }
 
 func TestChatHandler_HappyPath(t *testing.T) {
