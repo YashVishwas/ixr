@@ -88,6 +88,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Context-window escalation (RFC Gap 5) was fully built and unit-tested
+  but never actually invoked from the live request path: `chat.go` called
+  providers directly and never routed through `routing.Execute`, so a real
+  context-length overflow returned a raw 502 instead of escalating — for
+  both `model:"auto"` (whose computed `FallbackChain` was read for
+  `.Model` and then discarded) and any explicit catalog model. `chat.go`
+  now computes a fallback chain up front (from the scoring engine for
+  `auto`, or via new `routing.FallbackChainFor` for an explicit catalog
+  model) and routes through `Execute`/`ExecuteStream` whenever one exists;
+  a model outside the catalog keeps the old direct-call/502 behavior,
+  since there's no `ContextWindow` data to escalate against. Also fixed
+  two related executor bugs surfaced while wiring this up: `FallbackUsed`
+  was computed from a loop index that resets after an escalation (always
+  reporting `false` even when escalation succeeded), and an exhausted
+  fallback chain returned a zero-value `Model`/`Provider`, misattributing
+  the failure log to the original primary instead of whichever candidate
+  actually produced the error. `schema.CallEvent` gains
+  `FallbackUsed`/`FallbackFrom`, threaded through to `plugins/telemetry`.
+  Found while auditing a stale integration branch that had never been
+  merged despite fixing a live bug — see `docs/rfc/0001-semantic-cache.md`
+  Gap 5.
+- Shadow-routed requests bypassed reasoning-model token budget adjustment
+  (Gap 6) and OTEL shadow tagging (Gap 7): `runShadow` sent the shadow
+  model the caller's raw `max_tokens` instead of calling
+  `reasoning.AdjustTokenBudget`, and `plugins/telemetry` never populated
+  the `Shadow`/`ShadowOf` fields it already had, so shadow-routed calls
+  were indistinguishable from primary calls in any OTLP dashboard built on
+  these spans (silently double-counting tokens/cost whenever shadow
+  routing was active).
 - Google AI (Gemini/Gemma) and Bedrock adapters silently dropped image
   content on vision requests: their message-translation loops only ever
   read `m.Content`, never `m.Parts`, so the request still went through as
