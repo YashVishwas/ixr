@@ -1,0 +1,88 @@
+package googleai
+
+import (
+	"testing"
+
+	"github.com/YashVishwas/ixr/pkg/schema"
+)
+
+func TestToGenWireRequest_ToolsAndFunctionCalls(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "gemini-2.0-flash",
+		Messages: []schema.Message{
+			{Role: "user", Content: "weather in Austin?"},
+			{Role: "assistant", ToolCalls: []schema.ToolCall{
+				{ID: "fc_1", Type: "function", Function: schema.ToolFunction{Name: "get_weather", Arguments: `{"city":"Austin"}`}},
+			}},
+			{Role: "tool", ToolCallID: "fc_1", Content: `{"tempF":72}`},
+		},
+		Tools: []schema.Tool{{
+			Type:     "function",
+			Function: schema.FunctionDef{Name: "get_weather", Description: "Get current weather", Parameters: map[string]any{"type": "object"}},
+		}},
+	}
+
+	got := toGenWireRequest(req)
+
+	if len(got.Tools) != 1 || len(got.Tools[0].FunctionDeclarations) != 1 {
+		t.Fatalf("tools: got %+v", got.Tools)
+	}
+	if got.Tools[0].FunctionDeclarations[0].Name != "get_weather" {
+		t.Fatalf("function declaration: got %+v", got.Tools[0].FunctionDeclarations[0])
+	}
+
+	if len(got.Contents) != 3 {
+		t.Fatalf("contents: got %d, want 3 (user turn, model call-turn, function response-turn)", len(got.Contents))
+	}
+
+	callTurn := got.Contents[1]
+	if callTurn.Role != "model" || len(callTurn.Parts) != 1 || callTurn.Parts[0].FunctionCall == nil {
+		t.Fatalf("call turn: got %+v", callTurn)
+	}
+	if callTurn.Parts[0].FunctionCall.Name != "get_weather" || callTurn.Parts[0].FunctionCall.Args["city"] != "Austin" {
+		t.Fatalf("function call: got %+v", callTurn.Parts[0].FunctionCall)
+	}
+
+	respTurn := got.Contents[2]
+	if respTurn.Role != "function" || len(respTurn.Parts) != 1 || respTurn.Parts[0].FunctionResponse == nil {
+		t.Fatalf("response turn: got %+v", respTurn)
+	}
+	fr := respTurn.Parts[0].FunctionResponse
+	// Name is recovered from the call ID -> name map since the tool
+	// message itself didn't set Name.
+	if fr.Name != "get_weather" {
+		t.Errorf("function response name: got %q, want get_weather", fr.Name)
+	}
+	if fr.Response["tempF"] != float64(72) {
+		t.Errorf("function response body: got %+v", fr.Response)
+	}
+}
+
+func TestFromGenWireResponse_FunctionCallOnly(t *testing.T) {
+	wr := &genWireResponse{
+		Candidates: []genCandidate{{
+			Content: genContent{
+				Role: "model",
+				Parts: []genPart{
+					{FunctionCall: &genFunctionCall{Name: "get_weather", Args: map[string]any{"city": "Austin"}}},
+				},
+			},
+			FinishReason: "STOP",
+		}},
+	}
+
+	got, err := fromGenWireResponse("gemini-2.0-flash", wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	msg := got.Choices[0].Message
+	if msg.Content != "" {
+		t.Errorf("content: got %q, want empty", msg.Content)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "get_weather" {
+		t.Fatalf("tool_calls: got %+v", msg.ToolCalls)
+	}
+	if got.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason: got %q, want tool_calls (overridden despite raw STOP)", got.Choices[0].FinishReason)
+	}
+}

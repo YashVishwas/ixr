@@ -1,7 +1,9 @@
 package googleai
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +15,8 @@ import (
 type genWireRequest struct {
 	SystemInstruction *genSystemInstruction `json:"systemInstruction,omitempty"`
 	Contents          []genContent          `json:"contents"`
+	Tools             []genTool             `json:"tools,omitempty"`
+	ToolConfig        *genToolConfig        `json:"toolConfig,omitempty"`
 }
 
 type genSystemInstruction struct {
@@ -24,8 +28,43 @@ type genContent struct {
 	Parts []genPart `json:"parts"`
 }
 
+// genPart is a one-of: exactly one of Text, FunctionCall, or
+// FunctionResponse is set, matching Gemini's part shape.
 type genPart struct {
-	Text string `json:"text"`
+	Text             string               `json:"text,omitempty"`
+	FunctionCall     *genFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *genFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+type genFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args,omitempty"`
+}
+
+type genFunctionResponse struct {
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
+}
+
+type genTool struct {
+	FunctionDeclarations []genFunctionDeclaration `json:"functionDeclarations"`
+}
+
+type genFunctionDeclaration struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+}
+
+// genToolConfig mirrors Gemini's
+// {"toolConfig":{"functionCallingConfig":{"mode":"AUTO"|"ANY"|"NONE"}}}.
+type genToolConfig struct {
+	FunctionCallingConfig genFunctionCallingConfig `json:"functionCallingConfig"`
+}
+
+type genFunctionCallingConfig struct {
+	Mode                 string   `json:"mode"`
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 type genWireResponse struct {
@@ -50,6 +89,10 @@ type genUsage struct {
 func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 	var systemChunks []string
 	var contents []genContent
+	// Gemini's functionResponse only carries a name, not a call ID, so a
+	// tool-role message (which carries ixr's synthesized ToolCallID) needs
+	// this to look the name back up.
+	callIDToName := map[string]string{}
 
 	appendOrMerge := func(role, text string) {
 		text = strings.TrimSpace(text)
@@ -71,26 +114,108 @@ func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 		})
 	}
 
+	var pendingResponses []genPart
+	flushResponses := func() {
+		if len(pendingResponses) > 0 {
+			contents = append(contents, genContent{Role: "function", Parts: pendingResponses})
+			pendingResponses = nil
+		}
+	}
+
 	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			name := m.Name
+			if name == "" {
+				name = callIDToName[m.ToolCallID]
+			}
+			pendingResponses = append(pendingResponses, genPart{
+				FunctionResponse: &genFunctionResponse{
+					Name:     name,
+					Response: toResponseObject(m.Content),
+				},
+			})
+			continue
+		}
+		flushResponses()
+
 		switch m.Role {
 		case "system":
 			if strings.TrimSpace(m.Content) != "" {
 				systemChunks = append(systemChunks, strings.TrimSpace(m.Content))
 			}
-		case "user", "assistant":
-			appendOrMerge(m.Role, m.Content)
+		case "assistant":
+			if len(m.ToolCalls) > 0 {
+				var parts []genPart
+				if strings.TrimSpace(m.Content) != "" {
+					parts = append(parts, genPart{Text: m.Content})
+				}
+				for i, tc := range m.ToolCalls {
+					id := tc.ID
+					if id == "" {
+						id = "fc_" + strconv.Itoa(i)
+					}
+					callIDToName[id] = tc.Function.Name
+					var args map[string]any
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					parts = append(parts, genPart{FunctionCall: &genFunctionCall{Name: tc.Function.Name, Args: args}})
+				}
+				contents = append(contents, genContent{Role: "model", Parts: parts})
+				continue
+			}
+			appendOrMerge("assistant", m.Content)
+		case "user":
+			appendOrMerge("user", m.Content)
 		default:
 			appendOrMerge("user", m.Content)
 		}
 	}
+	flushResponses()
 
-	out := genWireRequest{Contents: contents}
+	out := genWireRequest{
+		Contents: contents,
+		Tools:    toGenTools(req.Tools),
+	}
 	if len(systemChunks) > 0 {
 		out.SystemInstruction = &genSystemInstruction{
 			Parts: []genPart{{Text: strings.Join(systemChunks, "\n\n")}},
 		}
 	}
 	return out
+}
+
+func toGenTools(tools []schema.Tool) []genTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	decls := make([]genFunctionDeclaration, len(tools))
+	for i, t := range tools {
+		decls[i] = genFunctionDeclaration{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  t.Function.Parameters,
+		}
+	}
+	return []genTool{{FunctionDeclarations: decls}}
+}
+
+// toResponseObject wraps a tool result string as the object Gemini's
+// functionResponse.response field requires — passing the parsed object
+// through directly if the content is already a JSON object, otherwise
+// wrapping the raw string.
+func toResponseObject(content string) map[string]any {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(content), &obj); err == nil {
+		return obj
+	}
+	return map[string]any{"result": content}
+}
+
+// synthCallID assigns a stable per-response ID to a function call, since
+// Gemini itself doesn't return one — it matches responses back to calls by
+// name, not ID, but pkg/schema.ToolCall requires an ID for OpenAI-shaped
+// clients that key off it.
+func synthCallID(name string, index int) string {
+	return fmt.Sprintf("fc_%s_%d", name, index)
 }
 
 func fromGenWireResponse(model string, wr *genWireResponse) (*schema.ResponseEnvelope, error) {
@@ -102,9 +227,11 @@ func fromGenWireResponse(model string, wr *genWireResponse) (*schema.ResponseEnv
 	}
 
 	c0 := wr.Candidates[0]
-	text, err := extractText(c0.Content.Parts)
-	if err != nil {
-		return nil, err
+	text, calls := splitParts(c0.Content.Parts)
+
+	finish := mapFinishReason(c0.FinishReason)
+	if len(calls) > 0 {
+		finish = "tool_calls"
 	}
 
 	return &schema.ResponseEnvelope{
@@ -114,9 +241,13 @@ func fromGenWireResponse(model string, wr *genWireResponse) (*schema.ResponseEnv
 		Model:   model,
 		Choices: []schema.Choice{
 			{
-				Index:        0,
-				Message:      schema.Message{Role: "assistant", Content: text},
-				FinishReason: mapFinishReason(c0.FinishReason),
+				Index: 0,
+				Message: schema.Message{
+					Role:      "assistant",
+					Content:   text,
+					ToolCalls: calls,
+				},
+				FinishReason: finish,
 			},
 		},
 		Usage: schema.Usage{
@@ -127,20 +258,32 @@ func fromGenWireResponse(model string, wr *genWireResponse) (*schema.ResponseEnv
 	}, nil
 }
 
-func extractText(parts []genPart) (string, error) {
+// splitParts separates a candidate's text and functionCall parts. A
+// function-call-only response (no text part) is valid and yields an empty
+// string, not an error.
+func splitParts(parts []genPart) (string, []schema.ToolCall) {
 	var b strings.Builder
-	for _, p := range parts {
+	var calls []schema.ToolCall
+	for i, p := range parts {
 		if p.Text != "" {
 			if b.Len() > 0 {
 				b.WriteString("\n")
 			}
 			b.WriteString(p.Text)
 		}
+		if p.FunctionCall != nil {
+			args, _ := json.Marshal(p.FunctionCall.Args)
+			calls = append(calls, schema.ToolCall{
+				ID:   synthCallID(p.FunctionCall.Name, i),
+				Type: "function",
+				Function: schema.ToolFunction{
+					Name:      p.FunctionCall.Name,
+					Arguments: string(args),
+				},
+			})
+		}
 	}
-	if b.Len() == 0 {
-		return "", fmt.Errorf("googleai: no text in candidate content")
-	}
-	return b.String(), nil
+	return b.String(), calls
 }
 
 func mapFinishReason(reason string) string {

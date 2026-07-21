@@ -19,6 +19,7 @@ import (
 	"time"
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
+	"github.com/YashVishwas/ixr/plugins/banditreward"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
@@ -44,6 +45,7 @@ import (
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
+	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
@@ -103,7 +105,6 @@ func Start(opts ...Option) error {
 
 	promReg := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(promReg)
-	_ = metrics // used via record() in handler (passed via context in future; wired at mux level for now)
 
 	// --- Stores ---
 	perfStore := modelperf.NewMemory()
@@ -159,10 +160,38 @@ func Start(opts ...Option) error {
 	bandit := scoring.NewEpsilonGreedy(0.1, scoring.DefaultRewardWeights)
 	shadowOrch := scoring.NewOrchestrator(perfStore, scoring.DefaultRewardWeights, bandit)
 
+	// Bandit-driven primary auto-routing (RFC Gap 12) — opt-in and off by
+	// default, so model:"auto" stays fully deterministic (and existing
+	// deployments see no behavior change) unless explicitly enabled. Shares
+	// the same bandit instance as shadow routing above, so exploration and
+	// reward from both paths reinforce one set of arm statistics.
+	if os.Getenv("IXR_AUTO_BANDIT") == "true" {
+		scoringEngine.SetBandit(bandit)
+		mgr.Register(banditreward.New(bandit))
+	}
+
 	// --- Semantic cache ---
 	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
 	responseCache := cache.NewMemory(cacheSize, cacheTTL)
+
+	// --- Model chains (RFC Gap 11) ---
+	chainDefs := make(map[string]struct {
+		Models  []string
+		Prompts []string
+	})
+	if fileCfg != nil {
+		for name, c := range fileCfg.Chains {
+			chainDefs[name] = struct {
+				Models  []string
+				Prompts []string
+			}{Models: c.Models, Prompts: c.Prompts}
+		}
+	}
+	chainRegistry, err := chain.BuildRegistry(chainDefs)
+	if err != nil {
+		return fmt.Errorf("chains config: %w", err)
+	}
 
 	// --- Chat handler ---
 	chatHandler := ingress.NewChatHandler(
@@ -171,6 +200,8 @@ func Start(opts ...Option) error {
 		ingress.WithEngine(scoringEngine),
 		ingress.WithCBRegistry(cbRegistry),
 		ingress.WithShadow(shadowOrch),
+		ingress.WithMetrics(metrics),
+		ingress.WithChains(chainRegistry),
 	)
 
 	// --- Rate limiter ---

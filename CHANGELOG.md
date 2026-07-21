@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Tool/function calling wired through every configured adapter: OpenAI and
+  Anthropic directly, Cerebras/DeepSeek/GitHub Models/Llama/Mistral/
+  OpenRouter/SambaNova/Zhipu/Ollama/llama.cpp/local via the shared
+  `openaicompat` adapter, and Gemini/Gemma via a dedicated translation for
+  Gemini's `functionCall`/`functionResponse` shape. `pkg/schema` already had
+  the types (`Tool`, `ToolCall`, `ToolChoice`) but no adapter forwarded them
+  or parsed `tool_calls` back out of a response — confirmed live before the
+  fix: a request with a tool defined against Anthropic came back "I don't
+  have access to that tool." `Message` gains `ToolCallID`/`Name` so tool
+  results (`role="tool"`) round-trip back to the originating call.
+- Pricing table (`internal/domain/routing/pricing.go`) so budget enforcement
+  actually prices real, by-name-requested models — the existing auto-routing
+  catalog only priced 7 hardcoded candidate IDs that don't overlap with any
+  model actually configured in `ixr.yaml` (e.g. `claude-haiku-4-5`,
+  `llama-3.3-70b-versatile`), so cost silently came back $0 and spend caps
+  never fired against live traffic.
+- Model chaining (`chains:` config in `ixr.yaml`): a request naming a chain
+  instead of a model runs a fixed sequence of models, each step's reply
+  feeding the next step's prompt (`internal/domain/chain`,
+  `internal/ingress/chain.go`). Restores the `fast-refine`/`smart-qa`/
+  `debate` example chains in `demo-ixr.yaml`.
+- Multimodal input (vision): `Message.Parts` carries image content alongside
+  text (`pkg/schema/content.go`), additive to the existing `Content` string
+  so text-only callers see no change. Wired through OpenAI, Anthropic
+  (`data:` URI and URL image sources), and `openaicompat`.
+- Bandit-driven exploration in primary `model:"auto"` routing, opt-in via
+  `IXR_AUTO_BANDIT=true` (default off): `scoring.Engine.SetBandit` lets
+  `Decide` pick via the existing epsilon-greedy bandit instead of always
+  taking the top deterministic score; `plugins/banditreward` closes the loop
+  by training the bandit from real primary-routed traffic, sharing arm
+  statistics with shadow routing.
 - Published `schema/ixr.proto` (Protocol Buffers v3) and `schema/ixr.schema.json`
   (JSON Schema draft 2020-12) covering `CallEvent`, `RequestEnvelope`,
   `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
@@ -34,6 +65,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Streaming was broken for every request, not just rate-limited ones:
+  `internal/ingress/ratelimit.go`'s `responseCapture` wrapped every response
+  in a struct that didn't forward `http.Flusher`, and rate-limit middleware
+  sits unconditionally in the request chain. `responseCapture` now forwards
+  `Flush()`.
+- User memory silently no-oped for the default tenant: both the read and
+  write paths treated `tenant_id == "default"` as anonymous, disabling
+  memory for any single-tenant/no-auth deployment — the demo config's own
+  setup. `"default"` is a legitimate tenant (the identity resolver's
+  default), not an anonymity signal.
+- Prometheus metrics were registered at startup but `Metrics.Record()` had
+  no callers, so `/metrics` reported nothing after real traffic. Wired into
+  both the streaming and non-streaming chat paths, and into chain step
+  execution.
+- `CallEvent.Latency` was `time.Duration` tagged `json:"latency_ms"` —
+  `time.Duration` has no custom `MarshalJSON`, so it serialized as raw
+  nanoseconds under a field name that lied about units. New `EventLatency`
+  type marshals as milliseconds.
+- Empty/missing `messages` were forwarded to the provider and its rejection
+  reported back as a misleading `502 provider_error`; now validated at
+  ingress and returned as `400`.
+- `routing.Execute`/`ExecuteStream` (retry with backoff, fallback-chain
+  walking, context-length escalation) existed and were exposed as
+  `ChatOption`s but had zero call sites outside their own file — every
+  direct-model request got exactly one attempt, and the circuit breaker was
+  only ever consulted for `model:"auto"` candidate filtering. Both the
+  streaming and non-streaming chat paths, and each chain step, now go
+  through the executor and check/update the circuit breaker. Also fixed a
+  latent correctness bug found while wiring this in: `streamWithRetry`
+  retried unconditionally on any non-4xx error, including mid-stream
+  failures after chunks were already flushed to the client, which would
+  have duplicated output on the wire — it now stops retrying once any chunk
+  has been emitted.
 - `internal/domain/routing/router.go` failed to compile — `knownContextWindows`
   and `defaultContextWindow` were each declared twice, with a stray
   struct-literal fragment sitting outside any struct in between, from an

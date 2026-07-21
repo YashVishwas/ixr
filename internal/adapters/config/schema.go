@@ -11,6 +11,16 @@ type Config struct {
 	LogLevel  string                    `yaml:"log_level"`
 	Secrets   SecretsConfig             `yaml:"secrets"`
 	Session   SessionConfig             `yaml:"session"`
+	Chains    map[string]ChainConfig    `yaml:"chains"`
+}
+
+// ChainConfig defines a named sequential model chain (see Gap 11 in
+// docs/rfc/0001-semantic-cache.md). Models and Prompts must be the same
+// length; Prompts[0] is typically "" (use the caller's original messages
+// verbatim for the first step).
+type ChainConfig struct {
+	Models  []string `yaml:"models"`
+	Prompts []string `yaml:"prompts"`
 }
 
 // SessionConfig controls cross-request conversation history.

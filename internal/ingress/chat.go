@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
 	"github.com/YashVishwas/ixr/internal/domain/cost"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/reasoning"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
+	"github.com/YashVishwas/ixr/internal/observability"
 	"github.com/YashVishwas/ixr/pkg/bus"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -49,6 +51,17 @@ func WithRetryConfig(cfg routing.RetryConfig) ChatOption {
 	return func(h *ChatHandler) { h.retryCfg = cfg }
 }
 
+// WithMetrics wires Prometheus request/latency/token metrics into the handler.
+func WithMetrics(m *observability.Metrics) ChatOption {
+	return func(h *ChatHandler) { h.metrics = m }
+}
+
+// WithChains registers named model chains (see docs/rfc/0001-semantic-cache.md
+// Gap 11), dispatched when "model" names a chain instead of a real model.
+func WithChains(reg chain.Registry) ChatOption {
+	return func(h *ChatHandler) { h.chains = reg }
+}
+
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
@@ -58,6 +71,8 @@ type ChatHandler struct {
 	cbRegistry *circuitbreaker.Registry
 	shadow     *scoring.Orchestrator
 	retryCfg   routing.RetryConfig
+	metrics    *observability.Metrics
+	chains     chain.Registry
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
@@ -87,7 +102,18 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Model == "auto" {
+	if len(req.Messages) == 0 {
+		writeError(w, http.StatusBadRequest, "missing_messages", "messages field must contain at least one message")
+		return
+	}
+
+	if c, ok := h.chains.Lookup(req.Model); ok {
+		h.handleChain(w, r, c, &req)
+		return
+	}
+
+	autoRouted := req.Model == "auto"
+	if autoRouted {
 		hint := taskHintFromHeaders(r, &req)
 		if h.engine != nil {
 			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
@@ -113,26 +139,50 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		h.handleStream(w, r, p, &req)
+		h.handleStream(w, r, p, &req, autoRouted)
+		return
+	}
+
+	if h.cbRegistry != nil && !h.cbRegistry.IsAllowed(req.Model) {
+		writeError(w, http.StatusServiceUnavailable, "circuit_open", "model temporarily unavailable (circuit breaker open)")
 		return
 	}
 
 	start := time.Now()
-	resp, err := p.Chat(r.Context(), reasoning.AdjustTokenBudget(&req))
+	decision := routing.RoutingDecision{Model: req.Model}
+	result, err := routing.Execute(r.Context(), decision, reasoning.AdjustTokenBudget(&req), routing.ProviderLookup(h.router), h.retryCfg)
+	resp := result.Response
 	latency := time.Since(start)
+
+	if h.cbRegistry != nil {
+		h.cbRegistry.RecordOutcome(req.Model, err == nil)
+	}
+
+	if h.metrics != nil {
+		status := http.StatusOK
+		var tokIn, tokOut int
+		if err != nil {
+			status = http.StatusBadGateway
+		} else {
+			tokIn = resp.Usage.PromptTokens
+			tokOut = resp.Usage.CompletionTokens
+		}
+		h.metrics.Record(p.Name(), req.Model, status, latency, tokIn, tokOut)
+	}
 
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
-			Timestamp: start,
-			Provider:  p.Name(),
-			Model:     req.Model,
-			Latency:   latency,
-			Request:   req,
-			UseCaseID: r.Header.Get("X-IXR-UseCase"),
-			TenantID:  id.TenantID,
-			TeamID:    id.TeamID,
-			UserID:    id.UserID,
+			Timestamp:  start,
+			Provider:   p.Name(),
+			Model:      req.Model,
+			Latency:    schema.EventLatency(latency),
+			Request:    req,
+			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
+			TenantID:   id.TenantID,
+			TeamID:     id.TeamID,
+			UserID:     id.UserID,
+			AutoRouted: autoRouted,
 		}
 		if err != nil {
 			ev.Error = err.Error()
@@ -168,10 +218,15 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope) {
+func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope, autoRouted bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming_error", "server does not support streaming")
+		return
+	}
+
+	if h.cbRegistry != nil && !h.cbRegistry.IsAllowed(req.Model) {
+		writeError(w, http.StatusServiceUnavailable, "circuit_open", "model temporarily unavailable (circuit breaker open)")
 		return
 	}
 
@@ -180,7 +235,8 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 	var totalIn, totalOut int
 	start := time.Now()
 
-	streamErr := p.Stream(r.Context(), reasoning.AdjustTokenBudget(req), func(chunk provider.StreamChunk) error {
+	decision := routing.RoutingDecision{Model: req.Model}
+	_, streamErr := routing.ExecuteStream(r.Context(), decision, reasoning.AdjustTokenBudget(req), routing.ProviderLookup(h.router), h.retryCfg, func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
@@ -192,24 +248,38 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		return nil
 	})
 
+	if h.cbRegistry != nil {
+		h.cbRegistry.RecordOutcome(req.Model, streamErr == nil)
+	}
+
 	writeSSEDone(w)
 	flusher.Flush()
+
+	streamLatency := time.Since(start)
+	if h.metrics != nil {
+		status := http.StatusOK
+		if streamErr != nil {
+			status = http.StatusBadGateway
+		}
+		h.metrics.Record(p.Name(), req.Model, status, streamLatency, totalIn, totalOut)
+	}
 
 	if h.bus != nil {
 		id := identity.FromContext(r.Context())
 		ev := &schema.CallEvent{
-			Timestamp: start,
-			Provider:  p.Name(),
-			Model:     req.Model,
-			Latency:   time.Since(start),
-			Request:   *req,
-			UseCaseID: r.Header.Get("X-IXR-UseCase"),
-			TenantID:  id.TenantID,
-			TeamID:    id.TeamID,
-			UserID:    id.UserID,
-			TokensIn:  totalIn,
-			TokensOut: totalOut,
-			Streaming: true,
+			Timestamp:  start,
+			Provider:   p.Name(),
+			Model:      req.Model,
+			Latency:    schema.EventLatency(streamLatency),
+			Request:    *req,
+			UseCaseID:  r.Header.Get("X-IXR-UseCase"),
+			TenantID:   id.TenantID,
+			TeamID:     id.TeamID,
+			UserID:     id.UserID,
+			TokensIn:   totalIn,
+			TokensOut:  totalOut,
+			AutoRouted: autoRouted,
+			Streaming:  true,
 		}
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
@@ -252,14 +322,14 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 	sp, err := h.router(shadowModel)
 	if err != nil {
 		ev.Error = err.Error()
-		ev.Latency = time.Since(start)
+		ev.Latency = schema.EventLatency(time.Since(start))
 		_ = h.bus.Publish(ctx, ev)
 		return
 	}
 	ev.Provider = sp.Name()
 
 	resp, err := sp.Chat(ctx, &shadowReq)
-	ev.Latency = time.Since(start)
+	ev.Latency = schema.EventLatency(time.Since(start))
 	if err != nil {
 		ev.Error = err.Error()
 	} else {

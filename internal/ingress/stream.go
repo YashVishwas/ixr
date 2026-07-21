@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/YashVishwas/ixr/pkg/provider"
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
 // writeSSEHeader sets headers required for server-sent events.
@@ -32,8 +33,9 @@ type sseDeltaChoice struct {
 }
 
 type sseDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string            `json:"role,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	ToolCalls []schema.ToolCall `json:"tool_calls,omitempty"`
 }
 
 // writeSSEChunk converts a provider.StreamChunk to the OpenAI SSE format and writes it.
@@ -50,7 +52,7 @@ func writeSSEChunk(w http.ResponseWriter, chunk provider.StreamChunk) error {
 		Model:   chunk.Model,
 		Choices: []sseDeltaChoice{{
 			Index:        0,
-			Delta:        sseDelta{Role: chunk.Delta.Role, Content: chunk.Delta.Content},
+			Delta:        sseDelta{Role: chunk.Delta.Role, Content: chunk.Delta.Content, ToolCalls: chunk.Delta.ToolCalls},
 			FinishReason: finishReason,
 		}},
 	}
