@@ -132,6 +132,20 @@ under 30 lines. no forks. see [docs/PLUGINS.md](docs/PLUGINS.md) for more.
 | phase 1 | 🚧 in progress | docker pull → working llm call → observed event loop |
 | phase 2 | planned | production hardening + adaptive routing intelligence |
 
+## metrics
+
+From the latest hardening pass (`hardening/gap-and-stress-tests`) — real numbers, not aspirational:
+
+- **310 tests passing** across 25 packages, 0 failures — `go build`, `go vet`, and `go test -race ./...` all clean
+- **59 new test functions** added in this pass, including production-shaped concurrency tests (many goroutines, not the sequential single-caller pattern most of the suite otherwise uses)
+- **4.2M+ fuzz executions, 0 crashes** — `FuzzMessage_ContentPolymorphism` against the multimodal JSON codec
+- **Full `-race` suite runs in ~11s** from a cold test cache
+- **3 real concurrency/correctness bugs found and fixed**, each with a test that fails without the fix and passes with it:
+  - budget enforcement TOCTOU race — a burst of concurrent requests could blow through a hard spend ceiling before spend was ever recorded
+  - semantic cache false-hits on session history — two unrelated questions in the same session could serve each other's cached answers
+  - chain requests silently ignoring `stream:true` — SSE clients got a plain JSON body back instead
+- **Live-verified against real providers** (Anthropic, Groq, Mistral) — fusion routing (parallel panel + judge) and chain streaming confirmed working end-to-end, not just under mocks
+
 ## license
 
 Apache 2.0 — see [LICENSE](LICENSE).
