@@ -3,6 +3,7 @@ package ingress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -186,7 +187,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		usedProvider = p.Name()
 	}
 
-	if h.cbRegistry != nil {
+	if h.cbRegistry != nil && shouldRecordOutcome(err) {
 		h.cbRegistry.RecordOutcome(req.Model, err == nil)
 	}
 
@@ -297,7 +298,7 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		result.Model = req.Model
 	}
 
-	if h.cbRegistry != nil {
+	if h.cbRegistry != nil && shouldRecordOutcome(streamErr) {
 		h.cbRegistry.RecordOutcome(req.Model, streamErr == nil)
 	}
 
@@ -400,6 +401,25 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		ev.Cost = cost.ForUsage(shadowModel, ev.TokensIn, ev.TokensOut)
 	}
 	_ = h.bus.Publish(ctx, ev)
+}
+
+// shouldRecordOutcome reports whether err should influence a model's circuit
+// breaker state. A context cancellation or deadline expiry reflects the
+// caller giving up (or the caller's own deadline), not the provider
+// failing — every provider call in this codebase shares the caller's
+// request context with no internal timeout layered on top (confirmed: no
+// context.WithTimeout/WithDeadline/WithCancel wraps a provider call
+// anywhere in this package or internal/domain/routing), so these two error
+// types never carry information about the model's actual health here.
+// Counting them as failures anyway trips breakers on perfectly healthy
+// models the moment the system is under enough load that callers start
+// timing out across the board — removing capacity at exactly the point a
+// self-amplifying cascade is most likely, in response to load, not to any
+// real problem with that model. Found via a load-test profiling pass: at
+// high enough concurrency, models never configured to fail started
+// tripping their breakers via context-canceled errors alone.
+func shouldRecordOutcome(err error) bool {
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func promptCharsFromMessages(req *schema.RequestEnvelope) int {

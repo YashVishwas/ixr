@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Opt-in pprof debug server (`IXR_PPROF_ADDR`, e.g. `127.0.0.1:6060`), off by
+  default. Deliberately not registered on the main mux — pprof exposes
+  goroutine stacks and heap contents and lets a caller trigger an expensive
+  CPU profile, none of which belongs on the same listener as the public API.
+- A sustained-load profiling harness (`internal/ingress/loadprofile_test.go`,
+  `IXR_LOADTEST=1`) that drives mixed concurrent traffic through the real
+  request pipeline — routing/scoring with the bandit live, circuit breaker,
+  semantic cache, sequential + fusion chains, hierarchical budget — with
+  fast stub providers standing in for the network edge, capturing
+  CPU/heap/goroutine/mutex/block profiles. Skipped by default; used to find
+  the circuit-breaker bug below. At realistic concurrency for the test
+  hardware (100–200 workers on 12 cores): 0 errors across ~477k requests,
+  +6 goroutines, no heap growth — no leaks or races found.
 - Concurrency stress tests exercising real production-shaped load (many
   goroutines, not the sequential single-caller pattern the existing test
   suite otherwise uses everywhere): `TestSemanticCache_ConcurrentLookupAndStore`
@@ -88,6 +101,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
+- Circuit breaker outcome recording conflated a caller giving up
+  (`context.Canceled`/`context.DeadlineExceeded`) with the provider actually
+  failing — all four `RecordOutcome` call sites (`chat.go` and `chain.go`,
+  streaming and non-streaming) used a bare `err == nil` check. A client
+  disconnecting says nothing about whether a model is healthy, but under
+  load-driven timeout pressure (found via a load-test profiling pass, not a
+  design review) this could trip breakers on models that were never actually
+  failing, removing routing capacity at exactly the point a cascade is most
+  likely. Fixed with `shouldRecordOutcome` in `internal/ingress/chat.go`,
+  gating all four call sites; a genuine provider error still trips the
+  breaker as before. See `docs/rfc/0001-semantic-cache.md` Gap 13 for the
+  related, still-open finding this surfaced: ixr has no system-level
+  admission control independent of per-model circuit breaking.
 - Context-window escalation (RFC Gap 5) was fully built and unit-tested
   but never actually invoked from the live request path: `chat.go` called
   providers directly and never routed through `routing.Execute`, so a real

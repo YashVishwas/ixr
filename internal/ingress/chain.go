@@ -176,7 +176,7 @@ func (h *ChatHandler) runChainStep(r *http.Request, chainName, model string, ste
 	result, err := routing.Execute(r.Context(), routing.RoutingDecision{Model: model}, reasoning.AdjustTokenBudget(stepReq), routing.ProviderLookup(h.router), h.retryCfg)
 	latency := time.Since(start)
 
-	if h.cbRegistry != nil {
+	if h.cbRegistry != nil && shouldRecordOutcome(err) {
 		h.cbRegistry.RecordOutcome(model, err == nil)
 	}
 
@@ -266,7 +266,7 @@ func (h *ChatHandler) streamChainStep(w http.ResponseWriter, r *http.Request, ch
 		return nil
 	})
 
-	if h.cbRegistry != nil {
+	if h.cbRegistry != nil && shouldRecordOutcome(streamErr) {
 		h.cbRegistry.RecordOutcome(model, streamErr == nil)
 	}
 

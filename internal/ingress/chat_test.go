@@ -193,6 +193,57 @@ func TestChatHandler_CircuitBreakerBlocksDirectModelRequest(t *testing.T) {
 	}
 }
 
+// TestChatHandler_ClientCancellationDoesNotTripCircuitBreaker locks in a
+// fix found via a load-test profiling pass: at high enough concurrency,
+// models that were never configured to fail started tripping their
+// circuit breakers anyway, via context-canceled errors alone. Cause: every
+// RecordOutcome call site treated "the request's context was canceled" (the
+// caller gave up, or the caller's own deadline expired) identically to "the
+// provider actually returned an error" — but a client disconnecting says
+// nothing about whether the model is healthy. Under real overload (for any
+// reason), many callers timing out at once would trip breakers on
+// perfectly good models, removing capacity exactly when the system can
+// least afford it — a self-inflicted cascade, not a response to any real
+// upstream problem.
+func TestChatHandler_ClientCancellationDoesNotTripCircuitBreaker(t *testing.T) {
+	cb := circuitbreaker.NewRegistry(circuitbreaker.Policy{
+		SuccessRateThreshold: 0.90,
+		WindowDuration:       time.Minute,
+		MinRequests:          1, // trips after a single recorded failure
+		HalfOpenAfter:        time.Hour,
+		ProbeCount:           1,
+	})
+
+	p := &stubProvider{name: "test", err: context.Canceled}
+	h := NewChatHandler(fixedRouter(p), nil, WithCBRegistry(cb))
+
+	// The caller's context is already canceled — simulating a client that
+	// gave up before (or as) the provider call returned.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if !cb.IsAllowed("gpt-4o") {
+		t.Error("a client cancellation must not trip the circuit breaker — the model was never actually unhealthy")
+	}
+
+	// A genuine provider error must still trip it as before — this fix
+	// must not go too far and make the breaker blind to real failures.
+	p2 := &stubProvider{name: "test", err: fmt.Errorf("upstream: status 500: internal error")}
+	h2 := NewChatHandler(fixedRouter(p2), nil, WithCBRegistry(cb), WithRetryConfig(fastRetryConfig))
+	w2 := post(h2, `{"model":"gpt-4o-2","messages":[{"role":"user","content":"hi"}]}`)
+	if w2.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502", w2.Code)
+	}
+	if cb.IsAllowed("gpt-4o-2") {
+		t.Error("a genuine provider error must still trip the circuit breaker")
+	}
+}
+
 var fastRetryConfig = routing.RetryConfig{
 	MaxAttempts:    3,
 	InitialBackoff: time.Millisecond,

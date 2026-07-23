@@ -10,7 +10,9 @@ package ixr
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -337,6 +339,32 @@ func Start(opts ...Option) error {
 	}
 
 	go memBus.Start(ctx)
+
+	// --- pprof (optional, off by default) ---
+	// Deliberately not registered on the main mux: pprof exposes goroutine
+	// stacks, heap contents, and lets a caller trigger an expensive CPU
+	// profile — none of that belongs on the same listener as the public API.
+	// IXR_PPROF_ADDR should be bound to localhost or an internal-only
+	// interface (e.g. "127.0.0.1:6060"), never a public address.
+	if addr := os.Getenv("IXR_PPROF_ADDR"); addr != "" {
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		pprofSrv := &http.Server{Addr: addr, Handler: pprofMux}
+		go func() {
+			if err := pprofSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("pprof server failed", "err", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = pprofSrv.Close()
+		}()
+		slog.Info("pprof debug server listening", "addr", addr)
+	}
 
 	// --- Server (TLS or plain) ---
 	if fileCfg != nil && fileCfg.Server.TLSCert != "" {
