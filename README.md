@@ -65,24 +65,13 @@ providers:
 
 ## architecture
 
-```
-your service
-    │
-    │  openai sdk (base_url=localhost:7000)
-    ▼
-┌─────────────────────────────────────────┐
-│                  ixr                    │
-│                                         │
-│  ingress → app → provider → response   │
-│                ↓                        │
-│            event bus                   │
-│           /    |    \                   │
-│       plugin plugin plugin             │
-└─────────────────────────────────────────┘
-    │             │
-    ▼             ▼
- openai       anthropic
-```
+![What it is](docs/images/architecture-1-what-it-is.png)
+
+![How it works](docs/images/architecture-2-how-it-works.png)
+
+![What's different](docs/images/architecture-3-whats-different.png)
+
+![Why it's better](docs/images/architecture-4-why-better.png)
 
 see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered model.
 
