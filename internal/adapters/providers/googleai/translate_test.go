@@ -58,6 +58,40 @@ func TestToGenWireRequest_ToolsAndFunctionCalls(t *testing.T) {
 	}
 }
 
+// TestToGenWireRequest_ImageContentDroppedNotErroredOrCorrupted locks in
+// the documented trade-off for RFC Gap 10: this adapter doesn't translate
+// vision content yet, but a message carrying it must still produce a
+// valid, text-only request (using the already-flattened m.Content) rather
+// than erroring or sending a malformed body — see the slog.Warn next to
+// this loop in translate.go for the operator-visibility half of the fix.
+func TestToGenWireRequest_ImageContentDroppedNotErroredOrCorrupted(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "gemini-2.0-flash",
+		Messages: []schema.Message{
+			{
+				Role:    "user",
+				Content: "what is in this image?", // flattened by pkg/schema's UnmarshalJSON
+				Parts: []schema.ContentPart{
+					{Type: "text", Text: "what is in this image?"},
+					{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "data:image/png;base64,AAAA"}},
+				},
+			},
+		},
+	}
+
+	got := toGenWireRequest(req)
+
+	if len(got.Contents) != 1 {
+		t.Fatalf("contents: got %d, want 1", len(got.Contents))
+	}
+	if len(got.Contents[0].Parts) != 1 || got.Contents[0].Parts[0].Text != "what is in this image?" {
+		t.Errorf("expected the flattened text to be forwarded, got %+v", got.Contents[0].Parts)
+	}
+	// No panic, no error return value to check (toGenWireRequest doesn't
+	// return one) — reaching here at all is the assertion that a
+	// multimodal message doesn't corrupt or crash the translation.
+}
+
 func TestFromGenWireResponse_FunctionCallOnly(t *testing.T) {
 	wr := &genWireResponse{
 		Candidates: []genCandidate{{

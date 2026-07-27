@@ -21,10 +21,11 @@ import (
 
 // stubProvider is a minimal provider.Provider for testing.
 type stubProvider struct {
-	name string
-	resp *schema.ResponseEnvelope
-	err  error
-	chat func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error)
+	name   string
+	resp   *schema.ResponseEnvelope
+	err    error
+	chat   func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error)
+	stream func(context.Context, *schema.RequestEnvelope, func(provider.StreamChunk) error) error
 }
 
 func (s *stubProvider) Name() string { return s.name }
@@ -34,7 +35,10 @@ func (s *stubProvider) Chat(ctx context.Context, req *schema.RequestEnvelope) (*
 	}
 	return s.resp, s.err
 }
-func (s *stubProvider) Stream(_ context.Context, _ *schema.RequestEnvelope, _ func(provider.StreamChunk) error) error {
+func (s *stubProvider) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
+	if s.stream != nil {
+		return s.stream(ctx, req, fn)
+	}
 	return s.err
 }
 
@@ -137,7 +141,13 @@ func TestChatHandler_RetriesTransientProviderErrors(t *testing.T) {
 
 // TestChatHandler_SkipsRetryOn4xx confirms a client error still fails fast
 // (one attempt) rather than burning the retry budget on a request that will
-// never succeed.
+// never succeed. Uses a model outside the routing catalog so this test
+// exercises only the single-provider retry mechanism (chatWithRetry's
+// isClientError skip), not catalog-driven fallback escalation (Gap 5) —
+// "gpt-4o" used to serve that purpose but is now a real catalog entry
+// (added by later pricing/context-window work), so a 4xx against it
+// escalates through up to 3 fallback candidates same as any other
+// catalog model, which isn't what this test is about.
 func TestChatHandler_SkipsRetryOn4xx(t *testing.T) {
 	calls := 0
 	p := &stubProvider{name: "test", chat: func(context.Context, *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
@@ -145,7 +155,7 @@ func TestChatHandler_SkipsRetryOn4xx(t *testing.T) {
 		return nil, fmt.Errorf("test: status 401: unauthorized")
 	}}
 	h := NewChatHandler(fixedRouter(p), nil, WithRetryConfig(fastRetryConfig))
-	w := post(h, `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+	w := post(h, `{"model":"test-model-not-in-catalog","messages":[{"role":"user","content":"hi"}]}`)
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status: got %d, want 502", w.Code)
 	}
@@ -180,6 +190,57 @@ func TestChatHandler_CircuitBreakerBlocksDirectModelRequest(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("provider calls: got %d, want 0 (breaker should short-circuit before calling the provider)", calls)
+	}
+}
+
+// TestChatHandler_ClientCancellationDoesNotTripCircuitBreaker locks in a
+// fix found via a load-test profiling pass: at high enough concurrency,
+// models that were never configured to fail started tripping their
+// circuit breakers anyway, via context-canceled errors alone. Cause: every
+// RecordOutcome call site treated "the request's context was canceled" (the
+// caller gave up, or the caller's own deadline expired) identically to "the
+// provider actually returned an error" — but a client disconnecting says
+// nothing about whether the model is healthy. Under real overload (for any
+// reason), many callers timing out at once would trip breakers on
+// perfectly good models, removing capacity exactly when the system can
+// least afford it — a self-inflicted cascade, not a response to any real
+// upstream problem.
+func TestChatHandler_ClientCancellationDoesNotTripCircuitBreaker(t *testing.T) {
+	cb := circuitbreaker.NewRegistry(circuitbreaker.Policy{
+		SuccessRateThreshold: 0.90,
+		WindowDuration:       time.Minute,
+		MinRequests:          1, // trips after a single recorded failure
+		HalfOpenAfter:        time.Hour,
+		ProbeCount:           1,
+	})
+
+	p := &stubProvider{name: "test", err: context.Canceled}
+	h := NewChatHandler(fixedRouter(p), nil, WithCBRegistry(cb))
+
+	// The caller's context is already canceled — simulating a client that
+	// gave up before (or as) the provider call returned.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if !cb.IsAllowed("gpt-4o") {
+		t.Error("a client cancellation must not trip the circuit breaker — the model was never actually unhealthy")
+	}
+
+	// A genuine provider error must still trip it as before — this fix
+	// must not go too far and make the breaker blind to real failures.
+	p2 := &stubProvider{name: "test", err: fmt.Errorf("upstream: status 500: internal error")}
+	h2 := NewChatHandler(fixedRouter(p2), nil, WithCBRegistry(cb), WithRetryConfig(fastRetryConfig))
+	w2 := post(h2, `{"model":"gpt-4o-2","messages":[{"role":"user","content":"hi"}]}`)
+	if w2.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502", w2.Code)
+	}
+	if cb.IsAllowed("gpt-4o-2") {
+		t.Error("a genuine provider error must still trip the circuit breaker")
 	}
 }
 
@@ -284,6 +345,108 @@ func TestChatHandler_UseCaseHeader(t *testing.T) {
 	}
 }
 
+func TestChatHandler_ContextLengthEscalation_ExplicitCatalogModel(t *testing.T) {
+	// gpt-5.3-codex (128k window) fails with a context-length error; the
+	// only catalog model in its fallback chain with a bigger window is
+	// llama-4-scout (10M) — confirm chat.go actually routes through
+	// routing.Execute and escalates, instead of surfacing a raw 502.
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	router := Router(func(model string) (provider.Provider, error) {
+		if model == "gpt-5.3-codex" {
+			return &stubProvider{
+				name: "primary",
+				err:  fmt.Errorf("openai: status 400: This model's maximum context length is 128000 tokens (context_length_exceeded)"),
+			}, nil
+		}
+		return &stubProvider{
+			name: "fallback-" + model,
+			resp: &schema.ResponseEnvelope{ID: "resp-" + model, Model: model, Choices: []schema.Choice{{}}},
+		}, nil
+	})
+
+	h := NewChatHandler(router, fakeBus)
+	w := post(h, `{"model":"gpt-5.3-codex","messages":[{"role":"user","content":"hello"}]}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (escalation should have recovered); body=%s", w.Code, w.Body.String())
+	}
+	ev := readEvent(t, published)
+	if !ev.FallbackUsed {
+		t.Error("expected FallbackUsed=true")
+	}
+	if ev.FallbackFrom != "gpt-5.3-codex" {
+		t.Errorf("FallbackFrom: got %q, want gpt-5.3-codex", ev.FallbackFrom)
+	}
+	if ev.Model == "gpt-5.3-codex" {
+		t.Error("expected the served model to differ from the failed primary")
+	}
+}
+
+func TestChatHandler_ContextLengthEscalation_AutoMode(t *testing.T) {
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	router := Router(func(model string) (provider.Provider, error) {
+		if model == "gpt-5.3-codex" {
+			return &stubProvider{
+				name: "primary",
+				err:  fmt.Errorf("openai: status 400: context_length_exceeded"),
+			}, nil
+		}
+		return &stubProvider{
+			name: "fallback-" + model,
+			resp: &schema.ResponseEnvelope{ID: "resp-" + model, Model: model, Choices: []schema.Choice{{}}},
+		}, nil
+	})
+
+	h := NewChatHandler(router, fakeBus)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-IXR-Task", "coding")
+	req.Header.Set("X-IXR-Latency", "sensitive")
+	req.Header.Set("X-IXR-Budget", "50")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	ev := readEvent(t, published)
+	if !ev.FallbackUsed || ev.FallbackFrom != "gpt-5.3-codex" {
+		t.Fatalf("expected auto-routed primary to escalate, got FallbackUsed=%v FallbackFrom=%q", ev.FallbackUsed, ev.FallbackFrom)
+	}
+}
+
+func TestChatHandler_ContextLengthError_NonCatalogModelDoesNotEscalate(t *testing.T) {
+	// The common real-world case: an explicit model outside the routing
+	// catalog has no ContextWindow data to escalate against, so behavior
+	// must be unchanged from before this feature existed — a plain 502.
+	// Uses a model name confirmed absent from the catalog — "gpt-4o" used
+	// to serve that purpose here but is now a real catalog entry (added by
+	// later pricing/context-window work), which would make this test
+	// exercise escalation instead of its absence.
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	p := &stubProvider{
+		name: "primary",
+		err:  fmt.Errorf("openai: status 400: context_length_exceeded"),
+	}
+	h := NewChatHandler(fixedRouter(p), fakeBus)
+	w := post(h, `{"model":"test-model-not-in-catalog","messages":[{"role":"user","content":"hello"}]}`)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502 (no catalog fallback available)", w.Code)
+	}
+	ev := readEvent(t, published)
+	if ev.FallbackUsed {
+		t.Error("expected no fallback for a non-catalog model")
+	}
+}
+
 func TestChatHandler_ComputesCostAndPropagatesIdentity(t *testing.T) {
 	published := make(chan *schema.CallEvent, 1)
 	fakeBus := &captureBus{ch: published}
@@ -346,6 +509,52 @@ func TestChatHandler_UnpricedModelYieldsZeroCost(t *testing.T) {
 	ev := readEvent(t, published)
 	if ev.Cost.TotalUSD != 0 {
 		t.Fatalf("expected zero cost for uncatalogued model, got %+v", ev.Cost)
+	}
+}
+
+func TestChatHandler_ShadowRoutingAppliesReasoningTokenBudget(t *testing.T) {
+	// Regression: runShadow used to send the shadow model the caller's
+	// unadjusted max_tokens, so a reasoning shadow model (which burns most
+	// of max_tokens on invisible chain-of-thought) would return a truncated
+	// response, invalidating the primary-vs-shadow comparison.
+	published := make(chan *schema.CallEvent, 2)
+	fakeBus := &captureBus{ch: published}
+	shadowReq := make(chan *schema.RequestEnvelope, 1)
+
+	router := Router(func(model string) (provider.Provider, error) {
+		switch model {
+		case "gpt-4o":
+			return &stubProvider{
+				name: "primary",
+				resp: &schema.ResponseEnvelope{ID: "primary-resp", Model: model, Choices: []schema.Choice{{}}},
+			}, nil
+		case "o3":
+			return &stubProvider{
+				name: "shadow",
+				chat: func(_ context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+					shadowReq <- req
+					return &schema.ResponseEnvelope{ID: "shadow-resp", Model: req.Model, Choices: []schema.Choice{{}}}, nil
+				},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unknown model %s", model)
+		}
+	})
+
+	h := NewChatHandler(router, fakeBus)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"gpt-4o","max_tokens":1000,"messages":[{"role":"user","content":"hello"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerShadowModel, "o3")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	gotReq := readRequest(t, shadowReq)
+	if gotReq.MaxTokens <= 1000 {
+		t.Fatalf("shadow request to a reasoning model should have a scaled-up max_tokens, got %d", gotReq.MaxTokens)
 	}
 }
 

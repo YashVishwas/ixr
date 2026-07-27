@@ -46,15 +46,23 @@ type ExecuteResult struct {
 func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestEnvelope, lookup ProviderLookup, cfg RetryConfig) (ExecuteResult, error) {
 	ordered := orderedCandidates(decision)
 	var lastErr error
+	var lastCandidate string
+	var lastProvider provider.Provider
 	totalAttempts := 0
+	usedFallback := false
 
 	for i := 0; i < len(ordered); i++ {
 		candidate := ordered[i]
+		lastCandidate = candidate.Model
+		if i > 0 {
+			usedFallback = true
+		}
 		p, err := lookup(candidate.Model)
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		lastProvider = p
 
 		resp, attempts, err := chatWithRetry(ctx, p, req, cfg)
 		totalAttempts += attempts
@@ -64,7 +72,7 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 				Response:     resp,
 				Provider:     p,
 				Model:        candidate.Model,
-				FallbackUsed: i > 0,
+				FallbackUsed: usedFallback,
 				FallbackFrom: decision.Model,
 				Attempts:     totalAttempts,
 			}, nil
@@ -72,7 +80,7 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecuteResult{Attempts: totalAttempts}, err
+			return ExecuteResult{Model: candidate.Model, Provider: p, Attempts: totalAttempts}, err
 		}
 
 		// Context-length overflow: rebuild the remaining candidates keeping only
@@ -81,11 +89,20 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 		if IsContextLengthError(err) {
 			currentWindow := ContextWindowFor(candidate.Model)
 			ordered = escalateCandidates(ordered[i+1:], currentWindow)
+			// i resets to -1 below (i++ makes it 0 next iteration), which would
+			// otherwise make "i > 0" forget that we've already moved off the
+			// original candidate — usedFallback is latched here instead so an
+			// escalated response is still correctly reported as a fallback.
+			usedFallback = true
 			i = -1 // reset; i++ will make it 0
 		}
 	}
 
-	return ExecuteResult{Attempts: totalAttempts}, lastErr
+	// Model/Provider reflect the last candidate actually attempted, not the
+	// original decision.Model — a caller logging this failure should
+	// attribute it to whichever fallback candidate produced lastErr, not the
+	// primary. Provider is nil if even the last candidate's lookup failed.
+	return ExecuteResult{Model: lastCandidate, Provider: lastProvider, FallbackUsed: usedFallback, FallbackFrom: decision.Model, Attempts: totalAttempts}, lastErr
 }
 
 // ExecuteStream mirrors Execute but calls Provider.Stream instead of Chat.
@@ -93,15 +110,23 @@ func Execute(ctx context.Context, decision RoutingDecision, req *schema.RequestE
 func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.RequestEnvelope, lookup ProviderLookup, cfg RetryConfig, fn func(provider.StreamChunk) error) (ExecuteResult, error) {
 	ordered := orderedCandidates(decision)
 	var lastErr error
+	var lastCandidate string
+	var lastProvider provider.Provider
 	totalAttempts := 0
+	usedFallback := false
 
 	for i := 0; i < len(ordered); i++ {
 		candidate := ordered[i]
+		lastCandidate = candidate.Model
+		if i > 0 {
+			usedFallback = true
+		}
 		p, err := lookup(candidate.Model)
 		if err != nil {
 			lastErr = err
 			continue
 		}
+		lastProvider = p
 
 		var attempts int
 		attempts, err = streamWithRetry(ctx, p, req, cfg, fn)
@@ -111,7 +136,7 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 			return ExecuteResult{
 				Provider:     p,
 				Model:        candidate.Model,
-				FallbackUsed: i > 0,
+				FallbackUsed: usedFallback,
 				FallbackFrom: decision.Model,
 				Attempts:     totalAttempts,
 			}, nil
@@ -119,17 +144,18 @@ func ExecuteStream(ctx context.Context, decision RoutingDecision, req *schema.Re
 
 		lastErr = err
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return ExecuteResult{Attempts: totalAttempts}, err
+			return ExecuteResult{Model: candidate.Model, Provider: p, Attempts: totalAttempts}, err
 		}
 
 		if IsContextLengthError(err) {
 			currentWindow := ContextWindowFor(candidate.Model)
 			ordered = escalateCandidates(ordered[i+1:], currentWindow)
+			usedFallback = true
 			i = -1
 		}
 	}
 
-	return ExecuteResult{Attempts: totalAttempts}, lastErr
+	return ExecuteResult{Model: lastCandidate, Provider: lastProvider, FallbackUsed: usedFallback, FallbackFrom: decision.Model, Attempts: totalAttempts}, lastErr
 }
 
 func chatWithRetry(ctx context.Context, p provider.Provider, req *schema.RequestEnvelope, cfg RetryConfig) (*schema.ResponseEnvelope, int, error) {

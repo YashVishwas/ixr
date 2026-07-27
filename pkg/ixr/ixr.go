@@ -10,7 +10,9 @@ package ixr
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -173,19 +175,23 @@ func Start(opts ...Option) error {
 	// --- Semantic cache ---
 	cacheSize := envInt("IXR_CACHE_SIZE", 1024)
 	cacheTTL := time.Duration(envInt("IXR_CACHE_TTL_SEC", 300)) * time.Second
-	responseCache := cache.NewMemory(cacheSize, cacheTTL)
+	exactCache := &cache.ExactCache{Memory: cache.NewMemory(cacheSize, cacheTTL)}
 
-	// --- Model chains (RFC Gap 11) ---
-	chainDefs := make(map[string]struct {
-		Models  []string
-		Prompts []string
-	})
+	var responseCache cache.RequestAwareCache = exactCache
+	if os.Getenv("IXR_SEMANTIC_CACHE") == "true" {
+		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
+		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
+		defer semanticBackend.Close()
+		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+	}
+
+	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
+	// parallel-panel-plus-judge, matching OmniRoute's fusion/pipeline
+	// routing strategies) ---
+	chainDefs := make(map[string]chain.Def)
 	if fileCfg != nil {
 		for name, c := range fileCfg.Chains {
-			chainDefs[name] = struct {
-				Models  []string
-				Prompts []string
-			}{Models: c.Models, Prompts: c.Prompts}
+			chainDefs[name] = chain.Def{Strategy: c.Strategy, Models: c.Models, Prompts: c.Prompts, Judge: c.Judge}
 		}
 	}
 	chainRegistry, err := chain.BuildRegistry(chainDefs)
@@ -334,6 +340,32 @@ func Start(opts ...Option) error {
 
 	go memBus.Start(ctx)
 
+	// --- pprof (optional, off by default) ---
+	// Deliberately not registered on the main mux: pprof exposes goroutine
+	// stacks, heap contents, and lets a caller trigger an expensive CPU
+	// profile — none of that belongs on the same listener as the public API.
+	// IXR_PPROF_ADDR should be bound to localhost or an internal-only
+	// interface (e.g. "127.0.0.1:6060"), never a public address.
+	if addr := os.Getenv("IXR_PPROF_ADDR"); addr != "" {
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		pprofSrv := &http.Server{Addr: addr, Handler: pprofMux}
+		go func() {
+			if err := pprofSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("pprof server failed", "err", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = pprofSrv.Close()
+		}()
+		slog.Info("pprof debug server listening", "addr", addr)
+	}
+
 	// --- Server (TLS or plain) ---
 	if fileCfg != nil && fileCfg.Server.TLSCert != "" {
 		srv, tlsErr := ingress.NewServerTLS(port, mux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
@@ -349,6 +381,15 @@ func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return def

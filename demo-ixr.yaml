@@ -61,3 +61,9 @@ chains:
       - ""
       - "Consider the previous answer critically. Offer a different perspective or correct any mistakes."
       - "Synthesize the two perspectives above into the best possible answer."
+  panel-judge:
+    strategy: fusion
+    models:
+      - llama-3.3-70b-versatile
+      - mistral-small-latest
+    judge: claude-haiku-4-5

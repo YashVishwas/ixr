@@ -14,13 +14,17 @@ type Config struct {
 	Chains    map[string]ChainConfig    `yaml:"chains"`
 }
 
-// ChainConfig defines a named sequential model chain (see Gap 11 in
-// docs/rfc/0001-semantic-cache.md). Models and Prompts must be the same
+// ChainConfig defines a named model chain (see Gap 11 in
+// docs/rfc/0001-semantic-cache.md). Strategy is "sequential" (default) or
+// "fusion". Sequential chains require Models and Prompts of the same
 // length; Prompts[0] is typically "" (use the caller's original messages
-// verbatim for the first step).
+// verbatim for the first step). Fusion chains require at least 2 Models
+// (the panel) and a Judge model that synthesizes their answers.
 type ChainConfig struct {
-	Models  []string `yaml:"models"`
-	Prompts []string `yaml:"prompts"`
+	Strategy string   `yaml:"strategy"`
+	Models   []string `yaml:"models"`
+	Prompts  []string `yaml:"prompts"`
+	Judge    string   `yaml:"judge"`
 }
 
 // SessionConfig controls cross-request conversation history.

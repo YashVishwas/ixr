@@ -12,16 +12,17 @@ import (
 )
 
 // CacheMiddleware wraps a ChatHandler and serves non-streaming requests from the
-// in-memory exact-match cache when available.
+// response cache when available. It accepts a RequestAwareCache so both
+// exact-match and semantic backends can be used interchangeably.
 type CacheMiddleware struct {
-	cache  cache.Cache
+	cache  cache.RequestAwareCache
 	ttl    time.Duration
 	next   http.Handler
 }
 
 // NewCacheMiddleware returns a caching wrapper around next.
 // ttl=0 uses the cache's default TTL.
-func NewCacheMiddleware(c cache.Cache, ttl time.Duration, next http.Handler) *CacheMiddleware {
+func NewCacheMiddleware(c cache.RequestAwareCache, ttl time.Duration, next http.Handler) *CacheMiddleware {
 	return &CacheMiddleware{cache: c, ttl: ttl, next: next}
 }
 
@@ -32,7 +33,7 @@ func (m *CacheMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We need to peek at the body to compute the cache key without consuming it.
+	// Peek at the body to decode the request without consuming it.
 	var req schema.RequestEnvelope
 	body := &bodyCapture{ReadCloser: r.Body}
 	if err := json.NewDecoder(body).Decode(&req); err != nil || req.Stream {
@@ -42,10 +43,9 @@ func (m *CacheMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := cache.Key(&req)
-	if resp, ok := m.cache.Get(r.Context(), key); ok {
-		slog.Debug("cache hit", "key", key[:8])
-		w.Header().Set("X-Cache", "HIT")
+	if resp, hit, ok := m.cache.Lookup(r.Context(), &req); ok {
+		slog.Debug("cache hit", "key", cache.Key(&req)[:8], "layer", hit)
+		w.Header().Set("X-Cache", hit.String())
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 		return
@@ -60,7 +60,7 @@ func (m *CacheMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rec.headerCode == http.StatusOK && len(rec.body) > 0 {
 		var resp schema.ResponseEnvelope
 		if err := json.Unmarshal(rec.body, &resp); err == nil {
-			m.cache.Set(r.Context(), key, &resp, m.ttl)
+			m.cache.Store(r.Context(), &req, &resp, m.ttl)
 		}
 	}
 }

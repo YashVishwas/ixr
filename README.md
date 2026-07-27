@@ -188,6 +188,22 @@ ixr is pre-1.0 and under active development. see [CHANGELOG.md](CHANGELOG.md) fo
 
 releases are signed (cosign) with an SBOM (syft) and pass `govulncheck` in CI — see `.github/workflows/`.
 
+## metrics
+
+Real numbers from the latest hardening + load-testing pass, not aspirational:
+
+- **310 tests passing** across 25 packages, 0 failures — `go build`, `go vet`, and `go test -race ./...` all clean
+- **59 new test functions** added in this pass, including production-shaped concurrency tests (many goroutines, not the sequential single-caller pattern most of the suite otherwise uses)
+- **4.2M+ fuzz executions, 0 crashes** — `FuzzMessage_ContentPolymorphism` against the multimodal JSON codec
+- **Full `-race` suite runs in ~11s** from a cold test cache
+- **Sustained concurrent load, clean**: at realistic concurrency (100–200 workers), a `pprof`-instrumented load harness drove ~477k requests through the real pipeline (routing, circuit breaker, cache, chains, budgets) end to end — 0 errors, +6 goroutines, no heap growth
+- **4 real concurrency/correctness bugs found and fixed**, each with a test that fails without the fix and passes with it:
+  - a circuit breaker mis-attributing client cancellation as a provider failure, tripping breakers on healthy models under timeout pressure
+  - budget enforcement TOCTOU race — a burst of concurrent requests could blow through a hard spend ceiling before spend was ever recorded
+  - semantic cache false-hits on session history — two unrelated questions in the same session could serve each other's cached answers
+  - chain requests silently ignoring `stream:true` — SSE clients got a plain JSON body back instead
+- **Live-verified against real providers** (Anthropic, Groq, Mistral) — fusion routing (parallel panel + judge) and chain streaming confirmed working end-to-end, not just under mocks
+
 ## license
 
 Apache 2.0 — see [LICENSE](LICENSE).

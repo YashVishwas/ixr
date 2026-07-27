@@ -209,6 +209,33 @@ func TestGenAIAttributes_FallbackNotUsed(t *testing.T) {
 	}
 }
 
+func TestGenAIAttributes_Shadow(t *testing.T) {
+	rec := makeRec("openai", "claude-3-5-sonnet", 11, 7, 300, true)
+	rec.Shadow = true
+	rec.ShadowOf = "gpt-4o"
+	attrs := genAIAttributes(rec)
+	attrMap := make(map[string]interface{})
+	for _, a := range attrs {
+		attrMap[string(a.Key)] = a.Value.AsInterface()
+	}
+	if attrMap["ixr.shadow"] != true {
+		t.Errorf("ixr.shadow: got %v", attrMap["ixr.shadow"])
+	}
+	if attrMap["ixr.shadow_of"] != "gpt-4o" {
+		t.Errorf("ixr.shadow_of: got %v", attrMap["ixr.shadow_of"])
+	}
+}
+
+func TestGenAIAttributes_NotShadow(t *testing.T) {
+	rec := makeRec("openai", "gpt-4o", 10, 20, 300, true)
+	attrs := genAIAttributes(rec)
+	for _, a := range attrs {
+		if string(a.Key) == "ixr.shadow" || string(a.Key) == "ixr.shadow_of" {
+			t.Fatalf("shadow attributes should be omitted for a primary call, got %s", a.Key)
+		}
+	}
+}
+
 // --- MultiSink ---
 
 func TestMultiSink_FansOut(t *testing.T) {

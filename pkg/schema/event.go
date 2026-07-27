@@ -53,6 +53,12 @@ type CallEvent struct {
 	// reward plugin (RFC Gap 12) only trains on these; a caller who named a
 	// model explicitly didn't opt into exploration.
 	AutoRouted bool `json:"auto_routed,omitempty"`
+
+	// FallbackUsed reports whether the call was served by a fallback model
+	// after the originally-requested model (FallbackFrom) failed — e.g. via
+	// context-window escalation. Both are zero-value on the common path.
+	FallbackUsed bool   `json:"fallback_used,omitempty"`
+	FallbackFrom string `json:"fallback_from,omitempty"`
 }
 
 // ShadowMetadata is attached to CallEvents emitted for shadow-routed requests.

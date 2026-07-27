@@ -15,6 +15,17 @@ func RouteWithDecision(hint TaskHint) RoutingDecision {
 	}
 }
 
+// FallbackChainFor scores the catalog against hint and returns up to n
+// candidates, excluding primaryModel. Used to build an escalation chain for
+// an explicitly-requested model (as opposed to model="auto", where the
+// scoring engine already produces one) — only meaningful when primaryModel
+// itself is a catalog entry, since escalateCandidates needs real
+// ContextWindow data for every candidate to filter on.
+func FallbackChainFor(primaryModel string, hint TaskHint, n int) []Candidate {
+	candidates := scoreAll(hint, catalog)
+	return BuildFallbackChain(candidates, primaryModel, n)
+}
+
 // BuildFallbackChain returns up to n candidates from the scored list, excluding
 // the primary model. candidates must already be sorted by descending score.
 func BuildFallbackChain(candidates []Candidate, primary string, n int) []Candidate {
