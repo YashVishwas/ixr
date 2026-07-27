@@ -44,61 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the full list rather than starving routing (`internal/domain/scoring/bandit.go`).
   See `docs/rfc/0001-semantic-cache.md` Gap 12 for the reward-threshold
   coupling this relies on.
-- Tool/function calling wired through every configured adapter: OpenAI and
-  Anthropic directly, Cerebras/DeepSeek/GitHub Models/Llama/Mistral/
-  OpenRouter/SambaNova/Zhipu/Ollama/llama.cpp/local via the shared
-  `openaicompat` adapter, and Gemini/Gemma via a dedicated translation for
-  Gemini's `functionCall`/`functionResponse` shape. `pkg/schema` already had
-  the types (`Tool`, `ToolCall`, `ToolChoice`) but no adapter forwarded them
-  or parsed `tool_calls` back out of a response — confirmed live before the
-  fix: a request with a tool defined against Anthropic came back "I don't
-  have access to that tool." `Message` gains `ToolCallID`/`Name` so tool
-  results (`role="tool"`) round-trip back to the originating call.
-- Pricing table (`internal/domain/routing/pricing.go`) so budget enforcement
-  actually prices real, by-name-requested models — the existing auto-routing
-  catalog only priced 7 hardcoded candidate IDs that don't overlap with any
-  model actually configured in `ixr.yaml` (e.g. `claude-haiku-4-5`,
-  `llama-3.3-70b-versatile`), so cost silently came back $0 and spend caps
-  never fired against live traffic.
-- Model chaining (`chains:` config in `ixr.yaml`): a request naming a chain
-  instead of a model runs a fixed sequence of models, each step's reply
-  feeding the next step's prompt (`internal/domain/chain`,
-  `internal/ingress/chain.go`). Restores the `fast-refine`/`smart-qa`/
-  `debate` example chains in `demo-ixr.yaml`.
-- Multimodal input (vision): `Message.Parts` carries image content alongside
-  text (`pkg/schema/content.go`), additive to the existing `Content` string
-  so text-only callers see no change. Wired through OpenAI, Anthropic
-  (`data:` URI and URL image sources), and `openaicompat`.
-- Bandit-driven exploration in primary `model:"auto"` routing, opt-in via
-  `IXR_AUTO_BANDIT=true` (default off): `scoring.Engine.SetBandit` lets
-  `Decide` pick via the existing epsilon-greedy bandit instead of always
-  taking the top deterministic score; `plugins/banditreward` closes the loop
-  by training the bandit from real primary-routed traffic, sharing arm
-  statistics with shadow routing.
-- Published `schema/ixr.proto` (Protocol Buffers v3) and `schema/ixr.schema.json`
-  (JSON Schema draft 2020-12) covering `CallEvent`, `RequestEnvelope`,
-  `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
-  generate typed bindings or validate payloads without reverse-engineering
-  the event stream (`schema/README.md`)
-- Hierarchical budget enforcement plugin: spend accumulates and is gated at
-  org → team → user scope (`tenantID[:teamID[:userID]]`), configured via
-  `tenants.<id>.quotas` / `tenants.<id>.teams.<id>.quotas` in `ixr.yaml`
-  (`plugins/budget`, `pkg/guardrail`)
-- `internal/domain/cost.ForUsage` prices a call against the routing catalog
-  and populates `CallEvent.Cost` on every request path (previously always
-  zero, so budget enforcement never actually triggered against live traffic)
-- `CallEvent` gains `TeamID`/`UserID` fields (from identity context) so spend
-  can be attributed below the tenant level
-- User memory: facts extracted from conversation turns (`RuleExtractor`,
-  regex-based) are stored per user (`tenantID:userID`) and injected as
-  context into new requests, gated on `IXR_MEMORY=true` and a concrete
-  `X-IXR-UserID` (`internal/domain/memory`, `plugins/memory`,
-  `internal/ingress/memory_middleware.go`)
-- Memory storage is bounded rather than growing forever: entries expire
-  after a TTL (`IXR_MEMORY_TTL_SEC`, default 1h) and are capped per user
-  (`IXR_MEMORY_MAX_PER_USER`, default 50); the on-disk journal is
-  recompacted on startup and periodically at runtime
-  (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
 
 ### Fixed
 - Circuit breaker outcome recording conflated a caller giving up
@@ -188,6 +133,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body instead of SSE: `chat.go` dispatched to `handleChain` before the
   `req.Stream` check ever ran. The terminal call in a chain (last
   sequential step, or the fusion judge) now streams when requested.
+
+## [0.2.0] - 2026-07-24
+
+### Added
+- End-to-end SSE streaming for all 12 providers (`Stream` method on `provider.Provider`)
+- JWT/API-key/mTLS auth middleware with hot-reload (`internal/ingress/auth.go`)
+- Sliding-window rate limiter with per-tenant token tracking (`internal/domain/policy`)
+- Circuit breaker state machine: Closed → Open → HalfOpen with configurable thresholds
+- Retry + exponential backoff executor with 4xx-skip and context-cancel abort (`internal/domain/routing/executor.go`)
+- Phase 2 scoring engine: policy-weighted filter → live `ModelPerfStore` stats → score → fallback chain (`internal/domain/scoring/engine.go`)
+- Epsilon-greedy and UCB bandit algorithms with atomic regret tracking (`internal/domain/scoring/bandit.go`)
+- Shadow routing: background goroutines per shadow model feeding bandit feedback (`internal/domain/scoring/shadow.go`)
+- Telemetry plugin: `CallEvent` → `TelemetryRecord` + `ModelPerfStore` upsert + JSON Lines sink
+- Config hot-reload via `fsnotify` with 200ms debounce; secrets expansion for Vault/AWS SSM
+- Multi-tenant identity resolver with per-request context propagation
+- OpenTelemetry tracing with OTLP HTTP export (no-op when `IXR_OTLP_ENDPOINT` unset)
+- Prometheus metrics on `GET /metrics`
+- `X-Request-ID` propagation middleware
+- SHA-256 exact-match semantic cache with LRU eviction + TTL (`internal/domain/cache`)
+- AWS Bedrock provider with raw SigV4 signing (no SDK dependency)
+- Ollama, llama.cpp, and generic local model providers
+- `POST /v1/embeddings` and `POST /v1/images/generations` with optional provider interfaces
+- Full tool-calling spec: `Tool`, `FunctionDef`, `ToolChoiceObject` in `pkg/schema`
+- Webhook fanout bus; NATS/Kafka/Kinesis/Pub/Sub compile stubs
+- JSON Schema registry on `GET /v1/schema`; `api/proto/ixr.proto` for gRPC clients
+- Redis/Postgres store interface stubs for `ModelPerfStore`, `PolicyStore`, circuit breaker state
+- Tool/function calling wired through every configured adapter: OpenAI and
+  Anthropic directly, Cerebras/DeepSeek/GitHub Models/Llama/Mistral/
+  OpenRouter/SambaNova/Zhipu/Ollama/llama.cpp/local via the shared
+  `openaicompat` adapter, and Gemini/Gemma via a dedicated translation for
+  Gemini's `functionCall`/`functionResponse` shape. `pkg/schema` already had
+  the types (`Tool`, `ToolCall`, `ToolChoice`) but no adapter forwarded them
+  or parsed `tool_calls` back out of a response — confirmed live before the
+  fix: a request with a tool defined against Anthropic came back "I don't
+  have access to that tool." `Message` gains `ToolCallID`/`Name` so tool
+  results (`role="tool"`) round-trip back to the originating call.
+- Pricing table (`internal/domain/routing/pricing.go`) so budget enforcement
+  actually prices real, by-name-requested models — the existing auto-routing
+  catalog only priced 7 hardcoded candidate IDs that don't overlap with any
+  model actually configured in `ixr.yaml` (e.g. `claude-haiku-4-5`,
+  `llama-3.3-70b-versatile`), so cost silently came back $0 and spend caps
+  never fired against live traffic.
+- Model chaining (`chains:` config in `ixr.yaml`): a request naming a chain
+  instead of a model runs a fixed sequence of models, each step's reply
+  feeding the next step's prompt (`internal/domain/chain`,
+  `internal/ingress/chain.go`). Restores the `fast-refine`/`smart-qa`/
+  `debate` example chains in `demo-ixr.yaml`.
+- Multimodal input (vision): `Message.Parts` carries image content alongside
+  text (`pkg/schema/content.go`), additive to the existing `Content` string
+  so text-only callers see no change. Wired through OpenAI, Anthropic
+  (`data:` URI and URL image sources), and `openaicompat`.
+- Bandit-driven exploration in primary `model:"auto"` routing, opt-in via
+  `IXR_AUTO_BANDIT=true` (default off): `scoring.Engine.SetBandit` lets
+  `Decide` pick via the existing epsilon-greedy bandit instead of always
+  taking the top deterministic score; `plugins/banditreward` closes the loop
+  by training the bandit from real primary-routed traffic, sharing arm
+  statistics with shadow routing.
+- Published `schema/ixr.proto` (Protocol Buffers v3) and `schema/ixr.schema.json`
+  (JSON Schema draft 2020-12) covering `CallEvent`, `RequestEnvelope`,
+  `ResponseEnvelope`, `Message`, and related types, so non-Go consumers can
+  generate typed bindings or validate payloads without reverse-engineering
+  the event stream (`schema/README.md`)
+- Hierarchical budget enforcement plugin: spend accumulates and is gated at
+  org → team → user scope (`tenantID[:teamID[:userID]]`), configured via
+  `tenants.<id>.quotas` / `tenants.<id>.teams.<id>.quotas` in `ixr.yaml`
+  (`plugins/budget`, `pkg/guardrail`)
+- `internal/domain/cost.ForUsage` prices a call against the routing catalog
+  and populates `CallEvent.Cost` on every request path (previously always
+  zero, so budget enforcement never actually triggered against live traffic)
+- `CallEvent` gains `TeamID`/`UserID` fields (from identity context) so spend
+  can be attributed below the tenant level
+- User memory: facts extracted from conversation turns (`RuleExtractor`,
+  regex-based) are stored per user (`tenantID:userID`) and injected as
+  context into new requests, gated on `IXR_MEMORY=true` and a concrete
+  `X-IXR-UserID` (`internal/domain/memory`, `plugins/memory`,
+  `internal/ingress/memory_middleware.go`)
+- Memory storage is bounded rather than growing forever: entries expire
+  after a TTL (`IXR_MEMORY_TTL_SEC`, default 1h) and are capped per user
+  (`IXR_MEMORY_MAX_PER_USER`, default 50); the on-disk journal is
+  recompacted on startup and periodically at runtime
+  (`IXR_MEMORY_COMPACT_INTERVAL_SEC`, default 15m)
+
+### Fixed
+- Provider entries in `ixr.yaml` with empty `api_key` are now silently skipped instead of failing startup
 - Streaming was broken for every request, not just rate-limited ones:
   `internal/ingress/ratelimit.go`'s `responseCapture` wrapped every response
   in a struct that didn't forward `http.Flusher`, and rate-limit middleware
@@ -227,35 +256,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier PR merge that silently interleaved two branches which both added
   the same `ContextWindow` infrastructure independently
 
-## [0.2.0] - 2026-06-05
-
-### Added
-- End-to-end SSE streaming for all 12 providers (`Stream` method on `provider.Provider`)
-- JWT/API-key/mTLS auth middleware with hot-reload (`internal/ingress/auth.go`)
-- Sliding-window rate limiter with per-tenant token tracking (`internal/domain/policy`)
-- Circuit breaker state machine: Closed → Open → HalfOpen with configurable thresholds
-- Retry + exponential backoff executor with 4xx-skip and context-cancel abort (`internal/domain/routing/executor.go`)
-- Phase 2 scoring engine: policy-weighted filter → live `ModelPerfStore` stats → score → fallback chain (`internal/domain/scoring/engine.go`)
-- Epsilon-greedy and UCB bandit algorithms with atomic regret tracking (`internal/domain/scoring/bandit.go`)
-- Shadow routing: background goroutines per shadow model feeding bandit feedback (`internal/domain/scoring/shadow.go`)
-- Telemetry plugin: `CallEvent` → `TelemetryRecord` + `ModelPerfStore` upsert + JSON Lines sink
-- Config hot-reload via `fsnotify` with 200ms debounce; secrets expansion for Vault/AWS SSM
-- Multi-tenant identity resolver with per-request context propagation
-- OpenTelemetry tracing with OTLP HTTP export (no-op when `IXR_OTLP_ENDPOINT` unset)
-- Prometheus metrics on `GET /metrics`
-- `X-Request-ID` propagation middleware
-- SHA-256 exact-match semantic cache with LRU eviction + TTL (`internal/domain/cache`)
-- AWS Bedrock provider with raw SigV4 signing (no SDK dependency)
-- Ollama, llama.cpp, and generic local model providers
-- `POST /v1/embeddings` and `POST /v1/images/generations` with optional provider interfaces
-- Full tool-calling spec: `Tool`, `FunctionDef`, `ToolChoiceObject` in `pkg/schema`
-- Webhook fanout bus; NATS/Kafka/Kinesis/Pub/Sub compile stubs
-- JSON Schema registry on `GET /v1/schema`; `api/proto/ixr.proto` for gRPC clients
-- Redis/Postgres store interface stubs for `ModelPerfStore`, `PolicyStore`, circuit breaker state
-
-### Fixed
-- Provider entries in `ixr.yaml` with empty `api_key` are now silently skipped instead of failing startup
-
 ## [0.1.0] - 2026-05-08
 
 ### Added
@@ -277,4 +277,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions — test (go vet + staticcheck + race detector), release (multi-arch binaries, cosign, syft SBOM, ghcr.io image), govulncheck
 - Apache 2.0 license
 
+[0.2.0]: https://github.com/YashVishwas/ixr/releases/tag/v0.2.0
 [0.1.0]: https://github.com/YashVishwas/ixr/releases/tag/v0.1.0
