@@ -118,9 +118,12 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	autoRouted := req.Model == "auto"
 	if autoRouted {
+		engineUsed := "static"
 		if h.engine != nil {
+			engineUsed = "adaptive"
 			decision, err := h.engine.Decide(r.Context(), hint, h.cbRegistry)
 			if err != nil || decision.Model == "" {
+				slog.Warn("auto-routing found no eligible candidate", "engine", engineUsed, "err", err)
 				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given constraints")
 				return
 			}
@@ -129,12 +132,29 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			decision := routing.RouteWithDecision(hint)
 			if decision.Model == "" {
+				slog.Warn("auto-routing found no eligible candidate", "engine", engineUsed, "prompt_chars", hint.PromptChars)
 				writeError(w, http.StatusBadRequest, "auto_route_failed", "no catalog model matched the given budget and task constraints")
 				return
 			}
 			req.Model = decision.Model
 			fallbackChain = decision.FallbackChain
 		}
+		// Debug, not Info: this fires on every auto-routed request, and the
+		// decision that matters operationally (what got used, what failed)
+		// is already covered by the Warn/Error paths below and by the
+		// CallEvent/TelemetryRecord published once a response comes back.
+		// This is for the "why did it pick that" question specifically.
+		slog.Debug("auto-routing decision",
+			"engine", engineUsed,
+			"primary", req.Model,
+			"fallback_chain", candidateModels(fallbackChain),
+			"reasoning_score", hint.ReasoningScore,
+			"coding_score", hint.CodingScore,
+			"math_score", hint.MathScore,
+			"multilingual_score", hint.MultilingualScore,
+			"max_cost_usd_per_1m", hint.MaxCostUSDPer1M,
+			"latency_sensitive", hint.LatencySensitive,
+		)
 	} else if _, inCatalog := routing.Lookup(req.Model); inCatalog {
 		// Escalation only applies when we have real ContextWindow data to
 		// escalate against. For an explicit model outside the catalog (the
@@ -146,6 +166,19 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	p, err := h.router(req.Model)
 	if err != nil {
+		if autoRouted {
+			// The case that started this: auto-routing can pick a model with
+			// no configured provider, and the fallback chain built above is
+			// never consulted here — chat.go returns before Execute() (which
+			// is the only thing that walks it) is ever called. Logging the
+			// chain anyway shows whether a viable candidate existed and was
+			// simply never tried.
+			slog.Warn("auto-routing picked a model with no configured provider",
+				"model", req.Model,
+				"fallback_chain", candidateModels(fallbackChain),
+				"err", err,
+			)
+		}
 		writeError(w, http.StatusBadRequest, "no_provider", err.Error())
 		return
 	}
@@ -475,7 +508,26 @@ type apiErrorBody struct {
 	Code    string `json:"code,omitempty"`
 }
 
+// candidateModels extracts just the model IDs from a candidate list, for
+// compact logging — a log line doesn't need the score field's precision.
+func candidateModels(candidates []routing.Candidate) []string {
+	out := make([]string, len(candidates))
+	for i, c := range candidates {
+		out[i] = c.Model
+	}
+	return out
+}
+
+// writeError previously wrote the error response only — every early-return
+// failure (a request that never got far enough to publish a CallEvent, e.g.
+// model:"auto" landing on a model with no configured provider) left zero
+// trace server-side. A caller saw a 4xx/5xx; the server logged nothing.
 func writeError(w http.ResponseWriter, status int, errType, message string) {
+	if status >= 500 {
+		slog.Error("request failed", "status", status, "error_type", errType, "message", message)
+	} else {
+		slog.Warn("request failed", "status", status, "error_type", errType, "message", message)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(apiError{
