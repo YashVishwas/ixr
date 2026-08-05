@@ -115,7 +115,7 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 	}
 
 	var msgID, model string
-	var inputTok int
+	var inputTok, cacheReadTok, cacheCreationTok int
 	toolCalls := newStreamToolCallAccumulator()
 
 	scanner := bufio.NewScanner(httpResp.Body)
@@ -138,6 +138,8 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 				msgID = ms.Message.ID
 				model = ms.Message.Model
 				inputTok = ms.Message.Usage.InputTokens
+				cacheReadTok = ms.Message.Usage.CacheReadInputTokens
+				cacheCreationTok = ms.Message.Usage.CacheCreationInputTokens
 			}
 
 		case "content_block_start":
@@ -173,10 +175,13 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 			if err := json.Unmarshal([]byte(data), &md); err != nil {
 				continue
 			}
+			promptTokens := inputTok + cacheReadTok + cacheCreationTok
 			u := schema.Usage{
-				PromptTokens:     inputTok,
-				CompletionTokens: md.Usage.OutputTokens,
-				TotalTokens:      inputTok + md.Usage.OutputTokens,
+				PromptTokens:             promptTokens,
+				CompletionTokens:         md.Usage.OutputTokens,
+				TotalTokens:              promptTokens + md.Usage.OutputTokens,
+				CacheReadInputTokens:     cacheReadTok,
+				CacheCreationInputTokens: cacheCreationTok,
 			}
 			chunk := provider.StreamChunk{
 				ID:           msgID,
