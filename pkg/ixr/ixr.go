@@ -23,6 +23,7 @@ import (
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	"github.com/YashVishwas/ixr/plugins/banditreward"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
+	"github.com/YashVishwas/ixr/plugins/compressor"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
@@ -267,6 +268,17 @@ func Start(opts ...Option) error {
 	mgr.Register(budgetPlugin) // accumulates spend post-call
 	if len(budgetLimits) > 0 {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
+	}
+
+	// Request compression (opt-in): shrinks oversized tool-result/history
+	// content before routing, caching, or the provider ever see it.
+	// guardrail.RequestInterceptor already runs pre-cache/pre-routing and
+	// InterceptorMiddleware already re-marshals a mutated req back into the
+	// body, so this reuses that existing extension point rather than adding
+	// a new one — see plugins/compressor's package doc for why.
+	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" {
+		maxChars := envInt("IXR_COMPRESS_MAX_CHARS", 0) // 0 → compressor.New's own default
+		interceptors = append(interceptors, compressor.New(maxChars))
 	}
 
 	// --- Session store (optional) ---
