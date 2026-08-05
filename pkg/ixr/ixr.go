@@ -94,6 +94,12 @@ func Start(opts ...Option) error {
 		return err
 	}
 
+	// log_level was parsed into Config but never actually applied to the
+	// logger anywhere — every deployment ran at Info regardless of what was
+	// configured, silently dropping Debug-level diagnostics (the routing
+	// decision logging below included).
+	slog.SetLogLoggerLevel(logLevelFromConfig(fileCfg))
+
 	// --- Observability ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -526,6 +532,26 @@ func buildRouter(registry map[string]provider.Provider) ingress.Router {
 		default:
 			return nil, fmt.Errorf("no provider found for model %q", model)
 		}
+	}
+}
+
+// logLevelFromConfig maps the config's log_level string to a slog.Level.
+// Defaults to Info — same as slog's own zero-value default — when no config
+// file was used or log_level wasn't set.
+func logLevelFromConfig(fileCfg *cfgloader.Config) slog.Level {
+	level := ""
+	if fileCfg != nil {
+		level = fileCfg.LogLevel
+	}
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 
