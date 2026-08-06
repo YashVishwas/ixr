@@ -22,7 +22,9 @@ import (
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	"github.com/YashVishwas/ixr/plugins/banditreward"
+	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
+	"github.com/YashVishwas/ixr/plugins/compressor"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
@@ -93,6 +95,12 @@ func Start(opts ...Option) error {
 	if err != nil {
 		return err
 	}
+
+	// log_level was parsed into Config but never actually applied to the
+	// logger anywhere — every deployment ran at Info regardless of what was
+	// configured, silently dropping Debug-level diagnostics (the routing
+	// decision logging below included).
+	slog.SetLogLoggerLevel(logLevelFromConfig(fileCfg))
 
 	// --- Observability ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -267,6 +275,26 @@ func Start(opts ...Option) error {
 	mgr.Register(budgetPlugin) // accumulates spend post-call
 	if len(budgetLimits) > 0 {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
+	}
+
+	// Request compression (opt-in): shrinks oversized tool-result/history
+	// content before routing, caching, or the provider ever see it.
+	// guardrail.RequestInterceptor already runs pre-cache/pre-routing and
+	// InterceptorMiddleware already re-marshals a mutated req back into the
+	// body, so this reuses that existing extension point rather than adding
+	// a new one — see plugins/compressor's package doc for why.
+	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" {
+		maxChars := envInt("IXR_COMPRESS_MAX_CHARS", 0) // 0 → compressor.New's own default
+		interceptors = append(interceptors, compressor.New(maxChars))
+	}
+
+	// Output-side brevity steering (opt-in): appends a terseness instruction
+	// to the system message so the model favors fragments over prose,
+	// trimming output tokens — the counterpart to input-side compression.
+	// Whether it actually reduces tokens is model behavior, not something
+	// this wiring can guarantee; see plugins/brevity's package doc.
+	if os.Getenv("IXR_TERSE_OUTPUT") == "true" {
+		interceptors = append(interceptors, brevity.New(os.Getenv("IXR_TERSE_INSTRUCTION")))
 	}
 
 	// --- Session store (optional) ---
@@ -526,6 +554,26 @@ func buildRouter(registry map[string]provider.Provider) ingress.Router {
 		default:
 			return nil, fmt.Errorf("no provider found for model %q", model)
 		}
+	}
+}
+
+// logLevelFromConfig maps the config's log_level string to a slog.Level.
+// Defaults to Info — same as slog's own zero-value default — when no config
+// file was used or log_level wasn't set.
+func logLevelFromConfig(fileCfg *cfgloader.Config) slog.Level {
+	level := ""
+	if fileCfg != nil {
+		level = fileCfg.LogLevel
+	}
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 

@@ -44,6 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the full list rather than starving routing (`internal/domain/scoring/bandit.go`).
   See `docs/rfc/0001-semantic-cache.md` Gap 12 for the reward-threshold
   coupling this relies on.
+- Routing-failure logging: `writeError` (`internal/ingress/chat.go`) never
+  logged anything, so every early-return failure across the 7 files that
+  share it (auth, chat, chain, ratelimit, embeddings, images,
+  schema_endpoint) was invisible server-side — a caller saw a 4xx/5xx, the
+  server logged nothing. Now logs status/error_type/message at Warn (4xx)
+  or Error (5xx). `log_level` in config was parsed but never applied to
+  `slog` (every deployment ran at Info regardless); wired via
+  `logLevelFromConfig`, applied once in `Start()`. Added a Debug-level
+  "auto-routing decision" log (engine, primary, fallback chain, task hint
+  scores) and a Warn specifically for `model:"auto"` picking a model with
+  no configured provider — the fallback chain built for that decision is
+  never consulted in this path (chat.go returns before `Execute()`, the
+  only thing that walks it, is ever called), so the chain is logged
+  anyway to show whether a viable candidate existed and was simply never
+  tried. Observability only — does not change routing behavior.
 
 ### Fixed
 - Circuit breaker outcome recording conflated a caller giving up
