@@ -22,6 +22,7 @@ import (
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	"github.com/YashVishwas/ixr/plugins/banditreward"
+	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
@@ -273,6 +274,15 @@ func Start(opts ...Option) error {
 	mgr.Register(budgetPlugin) // accumulates spend post-call
 	if len(budgetLimits) > 0 {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
+	}
+
+	// Output-side brevity steering (opt-in): appends a terseness instruction
+	// to the system message so the model favors fragments over prose,
+	// trimming output tokens — the counterpart to input-side compression.
+	// Whether it actually reduces tokens is model behavior, not something
+	// this wiring can guarantee; see plugins/brevity's package doc.
+	if os.Getenv("IXR_TERSE_OUTPUT") == "true" {
+		interceptors = append(interceptors, brevity.New(os.Getenv("IXR_TERSE_INSTRUCTION")))
 	}
 
 	// --- Session store (optional) ---
