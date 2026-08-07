@@ -99,14 +99,15 @@ func lastUserMessageIndex(messages []schema.Message) int {
 
 // compress applies content-aware compression, then truncates with a marker
 // if the result still exceeds maxChars. Valid JSON goes through
-// compressJSON (structure-aware — see json.go); everything else falls back
-// to line-oriented collapsing. Below maxChars after that, it's a no-op
-// beyond whatever collapsing already did.
+// compressJSON (structure-aware — see json.go), which already does its own
+// deduplication (schema-form collapses repeated keys, the only thing
+// json.Marshal's compact fallback could ever have in common with the line
+// heuristic is that neither has anything left to collapse). Everything
+// else falls back to line-oriented collapsing. Below maxChars after that,
+// it's a no-op beyond whatever collapsing already did.
 func compress(content string, maxChars int) string {
-	var collapsed string
-	if j, ok := compressJSON(content); ok {
-		collapsed = collapseRepeatedLines(j)
-	} else {
+	collapsed, ok := compressJSON(content)
+	if !ok {
 		collapsed = collapseRepeatedLines(collapseBlankLines(content))
 	}
 	if len(collapsed) <= maxChars {
