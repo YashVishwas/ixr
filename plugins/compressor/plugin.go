@@ -11,10 +11,11 @@
 // is already a full pre-routing request transformer with no new interface
 // or chain needed.
 //
-// This is a deliberately narrow first cut: collapsing repeated lines and
-// truncating past a configurable length, not a semantic compressor. It
-// never touches the system prompt or the caller's own latest turn — only
-// tool-result messages and older history are eligible.
+// Still deliberately narrow, not a semantic compressor: valid JSON gets a
+// structure-aware pass (see json.go), everything else gets line-oriented
+// collapsing, and anything still oversized after that gets truncated with a
+// marker. It never touches the system prompt or the caller's own latest
+// turn — only tool-result messages and older history are eligible.
 package compressor
 
 import (
@@ -96,11 +97,18 @@ func lastUserMessageIndex(messages []schema.Message) int {
 	return -1
 }
 
-// compress collapses redundant whitespace/duplicate lines, then truncates
-// with a marker if the result still exceeds maxChars. Below maxChars after
-// collapsing, it's a no-op beyond that collapsing.
+// compress applies content-aware compression, then truncates with a marker
+// if the result still exceeds maxChars. Valid JSON goes through
+// compressJSON (structure-aware — see json.go); everything else falls back
+// to line-oriented collapsing. Below maxChars after that, it's a no-op
+// beyond whatever collapsing already did.
 func compress(content string, maxChars int) string {
-	collapsed := collapseRepeatedLines(collapseBlankLines(content))
+	var collapsed string
+	if j, ok := compressJSON(content); ok {
+		collapsed = collapseRepeatedLines(j)
+	} else {
+		collapsed = collapseRepeatedLines(collapseBlankLines(content))
+	}
 	if len(collapsed) <= maxChars {
 		return collapsed
 	}

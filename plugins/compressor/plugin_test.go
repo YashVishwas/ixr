@@ -119,6 +119,35 @@ func TestIntercept_CompressesOversizedToolResult(t *testing.T) {
 	}
 }
 
+// TestIntercept_CompressesJSONToolResultViaSchemaForm confirms the JSON
+// path actually fires through the real Intercept entry point, not just via
+// direct calls to compressJSON.
+func TestIntercept_CompressesJSONToolResultViaSchemaForm(t *testing.T) {
+	p := New(4000) // threshold high enough that only the JSON restructuring matters here
+	longJSON := `[
+  {"id": 1, "name": "alice", "status": "active"},
+  {"id": 2, "name": "bob", "status": "active"},
+  {"id": 3, "name": "carol", "status": "inactive"}
+]`
+	req := &schema.RequestEnvelope{
+		Messages: []schema.Message{
+			{Role: "user", Content: "old question"},
+			{Role: "tool", ToolCallID: "t1", Content: longJSON},
+			{Role: "user", Content: "new question"},
+		},
+	}
+	if err := p.Intercept(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := req.Messages[1].Content
+	if !strings.HasPrefix(got, "schema: id, name, status") {
+		t.Fatalf("expected schema-form output, got %q", got)
+	}
+	if len(got) >= len(longJSON) {
+		t.Errorf("expected schema-form to shrink content: got len=%d, original len=%d", len(got), len(longJSON))
+	}
+}
+
 // --- compress (byte-for-byte) ---
 
 func TestCompress_BelowThreshold_ReturnsCollapsedButUntruncated(t *testing.T) {
