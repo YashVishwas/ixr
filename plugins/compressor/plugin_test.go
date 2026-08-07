@@ -152,19 +152,25 @@ func TestIntercept_CompressesJSONToolResultViaSchemaForm(t *testing.T) {
 
 func TestCompress_BelowThreshold_ReturnsCollapsedButUntruncated(t *testing.T) {
 	in := "line one\nline two"
-	got := compress(in, 1000)
+	got, omitted := compress(in, 1000)
 	want := "line one\nline two"
 	if got != want {
 		t.Errorf("compress(%q) = %q, want %q", in, got, want)
+	}
+	if omitted != 0 {
+		t.Errorf("expected omittedChars=0 when nothing was truncated, got %d", omitted)
 	}
 }
 
 func TestCompress_TruncatesPastMaxChars(t *testing.T) {
 	in := strings.Repeat("a", 100)
-	got := compress(in, 10)
+	got, omitted := compress(in, 10)
 	want := strings.Repeat("a", 10) + "\n... [truncated 90 chars]"
 	if got != want {
 		t.Errorf("compress(%q, 10) = %q, want %q", in, got, want)
+	}
+	if omitted != 90 {
+		t.Errorf("expected omittedChars=90, got %d", omitted)
 	}
 }
 
