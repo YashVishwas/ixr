@@ -149,9 +149,12 @@ func lastUserMessageIndex(messages []schema.Message) int {
 // compressJSON (structure-aware — see json.go), which already does its own
 // deduplication (schema-form collapses repeated keys, the only thing
 // json.Marshal's compact fallback could ever have in common with the line
-// heuristic is that neither has anything left to collapse). Everything
-// else falls back to line-oriented collapsing. Below maxChars after that,
-// it's a no-op beyond whatever collapsing already did.
+// heuristic is that neither has anything left to collapse). Non-JSON
+// content that looks like code goes through stripComments first (see
+// code.go) — full-line comments only, never inline, never import lines.
+// Whatever's left after either of those (or the original content, if
+// neither applied) still goes through line-oriented collapsing. Below
+// maxChars after that, it's a no-op beyond whatever collapsing already did.
 //
 // omittedChars is 0 when nothing was truncated (collapsing alone, even if
 // it changed the content, doesn't lose information the way cutting off the
@@ -162,7 +165,11 @@ func lastUserMessageIndex(messages []schema.Message) int {
 func compress(content string, maxChars int) (result string, omittedChars int) {
 	collapsed, ok := compressJSON(content)
 	if !ok {
-		collapsed = collapseRepeatedLines(collapseBlankLines(content))
+		base := content
+		if stripped, ok := stripComments(content); ok {
+			base = stripped
+		}
+		collapsed = collapseRepeatedLines(collapseBlankLines(base))
 	}
 	if len(collapsed) <= maxChars {
 		return collapsed, 0

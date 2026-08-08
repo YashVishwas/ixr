@@ -148,6 +148,31 @@ func TestIntercept_CompressesJSONToolResultViaSchemaForm(t *testing.T) {
 	}
 }
 
+// TestIntercept_StripsCommentsFromCodeToolResult confirms the comment
+// stripper fires through the real Intercept entry point, not just via
+// direct calls to stripComments.
+func TestIntercept_StripsCommentsFromCodeToolResult(t *testing.T) {
+	p := New(4000) // threshold high enough that only comment-stripping matters here
+	code := "func main() {\n\t// this is just noise\n\tfmt.Println(\"hi\")\n}"
+	req := &schema.RequestEnvelope{
+		Messages: []schema.Message{
+			{Role: "user", Content: "old question"},
+			{Role: "tool", ToolCallID: "t1", Content: code},
+			{Role: "user", Content: "new question"},
+		},
+	}
+	if err := p.Intercept(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := req.Messages[1].Content
+	if strings.Contains(got, "this is just noise") {
+		t.Errorf("expected the comment stripped, got %q", got)
+	}
+	if !strings.Contains(got, `fmt.Println("hi")`) {
+		t.Errorf("expected real code preserved, got %q", got)
+	}
+}
+
 // --- compress (byte-for-byte) ---
 
 func TestCompress_BelowThreshold_ReturnsCollapsedButUntruncated(t *testing.T) {
