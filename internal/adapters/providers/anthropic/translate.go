@@ -157,7 +157,16 @@ type streamMessageDelta struct {
 // as required by the Anthropic API. Anthropic has no role="tool" — consecutive tool
 // result messages are coalesced into a single role="user" message with one
 // tool_result content block per result, which the API requires.
-func toWireRequest(req *schema.RequestEnvelope) wireRequest {
+//
+// historyLen is the number of leading req.Messages entries that are
+// SessionMiddleware-injected history from prior turns rather than this
+// turn's new content (see internal/domain/cache.WithHistoryLen and
+// internal/ingress/session_middleware.go) — 0 when there's no session or
+// no history yet. When positive, the last message within that prefix gets
+// a cache_control breakpoint (see markHistoryCacheBreakpoint) so a growing
+// multi-turn conversation's stable prefix is cached across turns, not just
+// the system prompt.
+func toWireRequest(req *schema.RequestEnvelope, historyLen int) wireRequest {
 	var system string
 	var msgs []wireMessage
 	var pendingResults []wireContent
@@ -211,6 +220,8 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	}
 	flushResults()
 
+	markHistoryCacheBreakpoint(msgs, historyLen, req.Model)
+
 	var systemBlocks []wireContent
 	if system != "" {
 		systemBlocks = []wireContent{maybeCacheSystemBlock(req.Model, system)}
@@ -256,6 +267,51 @@ func maybeCacheSystemBlock(model, system string) wireContent {
 		block.CacheControl = &wireCacheControl{Type: "ephemeral"}
 	}
 	return block
+}
+
+// markHistoryCacheBreakpoint marks the last message within the
+// session-injected history prefix as a cache_control breakpoint, so a
+// growing multi-turn conversation's history is cached across turns the same
+// way the system prompt already is — this is what Anthropic (and Headroom,
+// under the name "live-zone compression") mean by caching everything except
+// the newest turn.
+//
+// Assumes the first historyLen entries of msgs correspond 1:1, in order, to
+// the first historyLen entries of req.Messages — true for
+// SessionMiddleware's actual output (internal/ingress/session_middleware.go
+// only ever stores clean [user, assistant] pairs, never system or tool
+// messages, so nothing in that prefix triggers toWireRequest's tool-result
+// coalescing or system-message extraction). If a caller bypasses
+// SessionMiddleware and hand-assembles multi-turn history into one request,
+// this assumption can break down — the result is a suboptimal cache split
+// (wrong boundary, or marking a tool-coalesced block), not a correctness
+// bug: cache_control placement has no effect on what's actually sent to the
+// model, only on cost/latency.
+//
+// plugins/compressor can never invalidate this: it runs before
+// SessionMiddleware injects history (see that package's doc), so it never
+// sees or touches session-stored messages at all — only the caller's new
+// turn for the current request.
+func markHistoryCacheBreakpoint(msgs []wireMessage, historyLen int, model string) {
+	if historyLen <= 0 || historyLen > len(msgs) {
+		return
+	}
+
+	var totalChars int
+	for _, m := range msgs[:historyLen] {
+		for _, c := range m.Content {
+			totalChars += len(c.Text) + len(c.Content)
+		}
+	}
+	if totalChars/4 < minCacheableTokens(model) {
+		return
+	}
+
+	blocks := msgs[historyLen-1].Content
+	if len(blocks) == 0 {
+		return
+	}
+	blocks[len(blocks)-1].CacheControl = &wireCacheControl{Type: "ephemeral"}
 }
 
 // toWireContentBlocks converts a message's content into Anthropic content

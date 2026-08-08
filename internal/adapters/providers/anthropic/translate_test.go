@@ -18,7 +18,7 @@ func TestToWireRequest_SystemLifted(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.System) != 1 || got.System[0].Text != "be concise" {
 		t.Errorf("system: got %+v, want a single block with text %q", got.System, "be concise")
@@ -43,7 +43,7 @@ func TestToWireRequest_NoSystem(t *testing.T) {
 		Messages: []schema.Message{{Role: "user", Content: "hello"}},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.System) != 0 {
 		t.Errorf("system: got %+v, want empty", got.System)
@@ -78,7 +78,7 @@ func TestToWireRequest_SystemCaching(t *testing.T) {
 					{Role: "user", Content: "hello"},
 				},
 			}
-			got := toWireRequest(req)
+			got := toWireRequest(req, 0)
 			if len(got.System) != 1 {
 				t.Fatalf("expected exactly one system block, got %d", len(got.System))
 			}
@@ -104,7 +104,7 @@ func TestToWireRequest_MultimodalDataURI(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.Messages) != 1 {
 		t.Fatalf("messages: got %d, want 1", len(got.Messages))
@@ -134,7 +134,7 @@ func TestToWireRequest_MultimodalHTTPURL(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	blocks := got.Messages[0].Content
 	if len(blocks) != 1 || blocks[0].Type != "image" || blocks[0].Source == nil {
@@ -150,7 +150,7 @@ func TestToWireRequest_PlainTextMessageStillSingleTextBlock(t *testing.T) {
 		Model:    "claude-sonnet-4-6",
 		Messages: []schema.Message{{Role: "user", Content: "hello"}},
 	}
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 	blocks := got.Messages[0].Content
 	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "hello" {
 		t.Errorf("expected unchanged single-text-block shape, got %+v", blocks)
@@ -172,7 +172,7 @@ func TestToWireRequest_Tools(t *testing.T) {
 		ToolChoice: "required",
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.Tools) != 1 || got.Tools[0].Name != "get_weather" {
 		t.Fatalf("tools: got %+v", got.Tools)
@@ -192,7 +192,7 @@ func TestToWireRequest_ToolChoiceForcedFunction(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != "get_weather" {
 		t.Fatalf("tool_choice: got %+v, want {tool get_weather}", got.ToolChoice)
@@ -214,7 +214,7 @@ func TestToWireRequest_ToolCallsAndResults(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.Messages) != 3 {
 		t.Fatalf("messages: got %d, want 3", len(got.Messages))
@@ -252,7 +252,7 @@ func TestToWireRequest_CoalescesParallelToolResults(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.Messages) != 2 {
 		t.Fatalf("messages: got %d, want 2 (results coalesced)", len(got.Messages))
