@@ -325,6 +325,16 @@ func Start(opts ...Option) error {
 	imagesHandler := ingress.NewImagesHandler(router)
 	mux.Handle("POST /v1/images/generations", obs(authMW.Handler(imagesHandler)))
 
+	// Memory management — lets a caller inspect/correct what's been
+	// remembered about them (Future Work item; also the practical answer
+	// to RFC Open Question 8's lack of a staleness-correction mechanism).
+	// Always registered, same as MemoryMiddleware's injection below: the
+	// store is harmless to read/delete from even when IXR_MEMORY=false and
+	// nothing is being extracted into it.
+	memoryHandler := ingress.NewMemoryHandler(memoryStore)
+	mux.Handle("GET /v1/memory", obs(authMW.Handler(memoryHandler)))
+	mux.Handle("DELETE /v1/memory/{id}", obs(authMW.Handler(memoryHandler)))
+
 	// Schema and metrics are unauthenticated
 	mux.Handle("GET /v1/schema", ingress.NewSchemaHandler())
 	mux.Handle("GET /metrics", observability.Handler(promReg))

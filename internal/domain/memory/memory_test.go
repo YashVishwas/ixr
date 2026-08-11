@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -95,6 +96,75 @@ func TestStore_Persistence(t *testing.T) {
 	entries, _ := s2.Recent(ctx, "acme", 10)
 	if len(entries) != 1 || entries[0].Content != "User's name is Arun" {
 		t.Fatalf("expected replayed entry, got: %+v", entries)
+	}
+	s2.Close()
+}
+
+// --- Delete ---
+
+func TestStore_Delete_RemovesEntry(t *testing.T) {
+	s := NewMemoryStore("")
+	ctx := context.Background()
+
+	_ = s.Save(ctx, Entry{ID: "e1", UserKey: "acme", Category: "name", Content: "User's name is Arun"})
+	_ = s.Save(ctx, Entry{ID: "e2", UserKey: "acme", Category: "project", Content: "User is building ixr"})
+
+	if err := s.Delete(ctx, "acme", "e1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	all, _ := s.All(ctx, "acme")
+	if len(all) != 1 || all[0].ID != "e2" {
+		t.Fatalf("expected only e2 to remain, got: %+v", all)
+	}
+}
+
+func TestStore_Delete_UnknownID_ErrNotFound(t *testing.T) {
+	s := NewMemoryStore("")
+	ctx := context.Background()
+	_ = s.Save(ctx, Entry{ID: "e1", UserKey: "acme", Category: "name", Content: "x"})
+
+	err := s.Delete(ctx, "acme", "does-not-exist")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got: %v", err)
+	}
+}
+
+func TestStore_Delete_ScopedToUserKey_CannotDeleteAnotherUsersEntry(t *testing.T) {
+	s := NewMemoryStore("")
+	ctx := context.Background()
+	_ = s.Save(ctx, Entry{ID: "e1", UserKey: "acme", Category: "name", Content: "Arun's fact"})
+
+	err := s.Delete(ctx, "other-tenant:someone-else", "e1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound when deleting under the wrong userKey, got: %v", err)
+	}
+
+	// Confirm it's genuinely untouched, not just an error with a side effect.
+	all, _ := s.All(ctx, "acme")
+	if len(all) != 1 {
+		t.Fatalf("expected the entry to survive a delete attempt under the wrong userKey, got: %+v", all)
+	}
+}
+
+func TestStore_Delete_SurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	s1 := NewMemoryStore(dir)
+	_ = s1.Save(ctx, Entry{ID: "e1", UserKey: "acme", Category: "name", Content: "keep"})
+	_ = s1.Save(ctx, Entry{ID: "e2", UserKey: "acme", Category: "project", Content: "delete me"})
+	if err := s1.Delete(ctx, "acme", "e2"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	s1.Close()
+
+	// The journal is append-only — Delete must rewrite it, or a restart
+	// would replay e2 right back into existence from the original Save line.
+	s2 := NewMemoryStore(dir)
+	all, _ := s2.All(ctx, "acme")
+	if len(all) != 1 || all[0].ID != "e1" {
+		t.Fatalf("expected only e1 to survive a restart after deleting e2, got: %+v", all)
 	}
 	s2.Close()
 }

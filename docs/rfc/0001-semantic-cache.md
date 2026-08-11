@@ -402,6 +402,8 @@ SessionMiddleware
 | `IXR_MEMORY_TOP_K` | `5` | Max memories injected per new session |
 | `IXR_MEMORY_EXTRACTOR` | `rule` | `rule` or `llm` |
 
+**Memory management API — implemented**, closing the Future Work item and providing the manual half of Open Question 8 (memory staleness/correction — see that entry above). `GET /v1/memory` (`internal/ingress/memory_handler.go`) lists every stored entry for the caller's own identity (`X-IXR-UserID`, same `memoryUserKey` scoping `MemoryMiddleware` already uses); `DELETE /v1/memory/{id}` removes one. Deletion is scoped to the caller's own `userKey` — the lookup fails with 404, not a cross-tenant delete, if an ID is guessed or belongs to a different user, since `memory.Store.Delete` takes `userKey` and `entryID` together rather than a global ID lookup. `memory.MemoryStore`'s journal is append-only (built for `Save`, never needed to remove anything before this), so `Delete` rewrites the on-disk journal to drop the entry durably — otherwise a restart would replay the original `Save` line right back into existence. Both endpoints are registered unconditionally (same as `MemoryMiddleware`'s injection) rather than gated behind `IXR_MEMORY=true` — harmless to expose even when nothing is being extracted, since there'd simply be nothing to list or delete.
+
 ---
 
 ### Gap 10 — Multimodal Input (Vision)
@@ -681,7 +683,7 @@ These are real problems in the ecosystem. ixr will not absorb them.
 
 7. **Memory extraction quality vs. latency tradeoff.** The `RuleExtractor` is fast and free but misses implicit facts. The `LLMExtractor` catches more but costs a small LLM call per turn. Should the extractor be configurable per tenant, or a single global setting? A hybrid (rule-first, LLM only when rules find nothing) may be the right default.
 
-8. **Memory staleness and correction.** Users change — someone who said "I work at Acme" last year may work somewhere else now. There is no mechanism to update or invalidate an existing memory entry when a newer fact contradicts it. The `LLMExtractor` could detect contradictions and overwrite; the `RuleExtractor` cannot. This needs a resolution before memory is considered reliable.
+8. **Memory staleness and correction — partially resolved.** Automatic contradiction detection is still unbuilt (the `LLMExtractor` could plausibly detect "I work at Acme" vs. a later "I work at Beta Corp" and overwrite; the `RuleExtractor` can't). What's now available is the manual half: `DELETE /v1/memory/{id}` (see the Memory Management API note under Gap 9 above) lets a caller — or an application built on top of ixr — remove a stale entry directly instead of waiting for it to age out via TTL. Not automatic reliability, but no longer "no mechanism at all."
 
 9. **Streaming session capture.** Streaming responses currently receive history injection but the response is not captured back into the session store (v1 constraint). A v2 SSE assembler that reconstructs the assistant turn from chunks would close this gap without buffering the stream for the client.
 
@@ -708,5 +710,4 @@ These are real problems in the ecosystem. ixr will not absorb them.
 - **Quality score in reward function** — the bandit scoring engine has a placeholder `δ * quality_score` term; wiring it requires a lightweight output quality signal (e.g. response length, format adherence, downstream error rate).
 - **User memory & cross-session context (Gap 9)** — `UserMemoryStore` + `MemoryExtractor` + injection via `SessionMiddleware`. `RuleExtractor` first, `LLMExtractor` as opt-in upgrade.
 - **Streaming session capture** — SSE assembler to reconstruct assistant turn from chunks and append to session store without buffering for the client.
-- **Memory management API** — `GET /v1/memory` and `DELETE /v1/memory/:id` endpoints so users can inspect and correct their stored memories.
 - **CNCF Sandbox submission** — the long-term governance target once the project reaches production stability across multiple adopters.
