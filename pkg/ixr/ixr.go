@@ -48,6 +48,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
+	"github.com/YashVishwas/ixr/internal/adapters/store/retrievalstore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
@@ -63,6 +64,7 @@ import (
 	pkgguardrail "github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 )
 
 // Option configures the ixr instance.
@@ -215,8 +217,23 @@ func Start(opts ...Option) error {
 	// store, so both sides need the one instance.
 	var retrievalStore *retrieval.Store
 	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" && os.Getenv("IXR_COMPRESS_REVERSIBLE") == "true" {
-		retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
-		retrievalStore = retrieval.NewStore(retrievalStoreSize)
+		// IXR_RETRIEVAL_REDIS_ADDR opts into a shared backend so a
+		// retrieval ID minted by one ixr replica can be resolved by
+		// another sitting behind the same load balancer — the default
+		// in-memory backend is single-instance only (see
+		// internal/domain/retrieval.Backend's doc comment). Unset means
+		// exactly the pre-feature in-memory behavior; never mandatory.
+		if redisAddr := os.Getenv("IXR_RETRIEVAL_REDIS_ADDR"); redisAddr != "" {
+			redisClient := redis.NewClient(&redis.Options{
+				Addr:     redisAddr,
+				Password: os.Getenv("IXR_RETRIEVAL_REDIS_PASSWORD"),
+				DB:       envInt("IXR_RETRIEVAL_REDIS_DB", 0),
+			})
+			retrievalStore = retrieval.NewStoreWithBackend(retrievalstore.New(redisClient))
+		} else {
+			retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
+			retrievalStore = retrieval.NewStore(retrievalStoreSize)
+		}
 	}
 
 	// --- Chat handler ---
