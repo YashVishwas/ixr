@@ -64,6 +64,17 @@ type ModelCard struct {
 	ContextWindow int
 }
 
+// catalog is the curated candidate set model:"auto" scores and picks from —
+// InputUSDPer1M/OutputUSDPer1M here drive real cost-based routing decisions
+// and cost.ForUsage pricing for every model in it (Lookup checks catalog
+// before falling back to pricingTable in pricing.go). Same caveat as that
+// table, but more consequential here since it's not just displayed cost,
+// it's what "cheapest" actually means to the router: these are a
+// best-effort snapshot of published provider pricing, gathered manually,
+// not kept in sync automatically, and not billing-grade. If auto-routing's
+// cost-based candidate selection looks wrong, check whether a rate here has
+// drifted from the provider's current pricing page before assuming a
+// routing-logic bug.
 var catalog = []ModelCard{
 	{
 		ID:             "claude-opus-4.7",
