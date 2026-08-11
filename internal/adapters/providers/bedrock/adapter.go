@@ -75,26 +75,60 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 	return a.parseResponse(req.Model, respBody)
 }
 
-// Stream is not yet implemented for Bedrock — falls back to a Chat call.
+// Stream calls Bedrock's InvokeModelWithResponseStream endpoint, which
+// returns an "application/vnd.amazon.eventstream"-framed response (AWS's
+// binary event-stream protocol — see eventstream.go) rather than SSE.
+// Bedrock wraps each inner Anthropic-shaped event (message_start,
+// content_block_delta, message_delta, message_stop — the same event
+// sequence and JSON field names as native Anthropic's streaming Messages
+// API, since this is the identical underlying model) in a "chunk" event
+// whose payload is itself JSON of the form {"bytes": "<base64>"}, where
+// the base64-decoded bytes are the inner event.
+//
+// Scope note: this mirrors parseResponse's existing capability level
+// (text content only) rather than adding tool-call streaming support that
+// doesn't exist in the non-streaming path either — Chat/parseResponse
+// today only extracts text content blocks from a response, silently
+// ignoring tool_use blocks. That's a separate, pre-existing gap, not
+// something this change expands scope to fix.
 func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
-	resp, err := a.Chat(ctx, req)
+	body, err := a.buildBody(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("bedrock: build body: %w", err)
 	}
-	if len(resp.Choices) > 0 {
-		_ = fn(provider.StreamChunk{
-			ID:           resp.ID,
-			Model:        resp.Model,
-			Delta:        schema.Message{Role: "assistant", Content: resp.Choices[0].Message.Content},
-			FinishReason: resp.Choices[0].FinishReason,
-			Usage:        &resp.Usage,
-		})
+
+	url := a.streamEndpointURL(req.Model)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("bedrock: build stream request: %w", err)
 	}
-	return nil
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/vnd.amazon.eventstream")
+
+	if err := a.sign(httpReq, body); err != nil {
+		return fmt.Errorf("bedrock: sign stream request: %w", err)
+	}
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("bedrock: do stream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("bedrock: stream status %d: %s", resp.StatusCode, b)
+	}
+
+	return streamBedrockEvents(resp.Body, req.Model, fn)
 }
 
 func (a *Adapter) endpointURL(model string) string {
 	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke", a.region, model)
+}
+
+func (a *Adapter) streamEndpointURL(model string) string {
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream", a.region, model)
 }
 
 // contentBlock is Bedrock Claude's content-block shape — the same as
