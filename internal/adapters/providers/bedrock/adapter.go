@@ -99,7 +99,9 @@ func (a *Adapter) endpointURL(model string) string {
 }
 
 // buildBody converts the canonical request to the Bedrock Claude wire format.
-// This handles the Anthropic Claude family hosted on Bedrock.
+// This handles the Anthropic Claude family hosted on Bedrock — the same
+// wire shape as native Anthropic's Messages API, including a top-level
+// "system" string separate from "messages".
 // Other families (Llama, Nova) use different schemas — extend as needed.
 func (a *Adapter) buildBody(req *schema.RequestEnvelope) ([]byte, error) {
 	type message struct {
@@ -109,13 +111,29 @@ func (a *Adapter) buildBody(req *schema.RequestEnvelope) ([]byte, error) {
 	type bedrockReq struct {
 		AnthropicVersion string    `json:"anthropic_version"`
 		MaxTokens        int       `json:"max_tokens"`
+		System           string    `json:"system,omitempty"`
 		Messages         []message `json:"messages"`
 	}
 
+	var system string
 	msgs := make([]message, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		if m.Role == "system" {
-			continue // system messages handled separately in full Anthropic Bedrock schema
+			// Lifted to the top-level System field below, not sent as a
+			// message — Bedrock's Claude endpoint rejects role="system" in
+			// the messages array, same as native Anthropic. Concatenate
+			// rather than overwrite: a request can legitimately carry more
+			// than one system-role message (e.g. MemoryMiddleware prepends
+			// a user-facts system message ahead of the caller's own one) —
+			// this used to silently drop every system message, always, via
+			// an unconditional `continue` with no System field to lift into
+			// at all.
+			if system != "" {
+				system += "\n\n" + m.Content
+			} else {
+				system = m.Content
+			}
+			continue
 		}
 		if len(m.Parts) > 0 {
 			// Vision (RFC Gap 10) isn't wired for this adapter yet — only
@@ -134,6 +152,7 @@ func (a *Adapter) buildBody(req *schema.RequestEnvelope) ([]byte, error) {
 	return json.Marshal(bedrockReq{
 		AnthropicVersion: "bedrock-2023-05-31",
 		MaxTokens:        4096,
+		System:           system,
 		Messages:         msgs,
 	})
 }
