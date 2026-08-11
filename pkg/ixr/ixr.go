@@ -307,15 +307,23 @@ func Start(opts ...Option) error {
 		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
 	}
 
-	// Chat completions: auth → rate limit → interceptors → memory → session → cache → chat
+	// Admission control (RFC Gap 13, opt-in): caps aggregate in-flight
+	// requests regardless of which model is requested — complementary to
+	// per-model circuit breaking, not redundant with it. Checked before
+	// rate limiting (which does per-identity accounting work of its own)
+	// since there's no point doing that work if the system is already
+	// globally saturated. 0/unset disables it entirely.
+	admissionMW := ingress.NewAdmissionMiddleware(envInt("IXR_MAX_INFLIGHT", 0))
+
+	// Chat completions: auth → admission control → rate limit → interceptors → memory → session → cache → chat
 	// Memory sits outside session (per MemoryMiddleware's doc comment) so the
 	// memory system message is in place before session history is appended.
 	memTopK := envInt("IXR_MEMORY_TOP_K", 5)
-	chatChain := authMW.Handler(rateMW.Handler(
+	chatChain := authMW.Handler(admissionMW.Handler(rateMW.Handler(
 		ingress.NewInterceptorMiddleware(interceptors,
 			ingress.NewMemoryMiddleware(memoryStore, memTopK, middleChain),
 		).WithBus(memBus),
-	))
+	)))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
