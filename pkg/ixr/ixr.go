@@ -121,14 +121,31 @@ func Start(opts ...Option) error {
 	// --- Circuit breaker ---
 	cbRegistry := circuitbreaker.NewRegistry(circuitbreaker.DefaultPolicy)
 
-	// --- Scoring engine ---
-	scoringEngine := scoring.NewEngine(perfStore, policyMem, routing.Catalog())
-
 	// --- Identity resolver ---
 	resolver := &identity.Resolver{}
 
 	// --- Router (model name → provider) ---
 	router := buildRouter(registry)
+
+	// --- Scoring engine ---
+	// model:"auto" used to score against the full routing catalog
+	// regardless of which providers this deployment actually configures.
+	// A catalog entry whose provider isn't configured can still win the
+	// score, and chat.go has no recovery for that: the fallback chain it
+	// builds only helps when a provider resolved but then failed at
+	// runtime (timeout, rate limit, 5xx) — a provider that never resolved
+	// at all short-circuits to a 400 before Execute (the only thing that
+	// walks the fallback chain) is ever called. Net effect: any deployment
+	// configuring fewer providers than the full catalog assumes — which is
+	// most real deployments — had "auto" routinely fail outright instead
+	// of falling back to something it could actually serve.
+	//
+	// Filtering the catalog to only provider-configured entries here,
+	// reusing buildRouter's own resolution logic rather than a second,
+	// separately-maintained availability check, means "auto" can only
+	// ever pick (and only ever build a fallback chain from) something
+	// this deployment can actually serve.
+	scoringEngine := scoring.NewEngine(perfStore, policyMem, availableCatalog(routing.Catalog(), router))
 
 	// --- User memory store (optional) ---
 	// Bounded by default (1h TTL, 50 entries/user, journal recompacted every
@@ -399,6 +416,20 @@ func envFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// availableCatalog filters cat down to entries whose provider resolves via
+// resolve (buildRouter's dispatch function) — see the comment where this is
+// called for why model:"auto" must never consider a candidate this
+// deployment can't actually serve.
+func availableCatalog(cat []routing.ModelCard, resolve ingress.Router) []routing.ModelCard {
+	out := make([]routing.ModelCard, 0, len(cat))
+	for _, m := range cat {
+		if _, err := resolve(m.ID); err == nil {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // buildRouter constructs the prefix-based model→provider dispatch function.

@@ -49,11 +49,12 @@ func TestRoute_ZeroHintSensibleDefault(t *testing.T) {
 		t.Fatal("expected non-empty default route")
 	}
 	allowed := map[string]struct{}{
-		"gemma-3-27b":      {},
-		"gpt-5.3-codex":    {},
-		"llama-4-scout":    {},
-		"deepseek-v3-0324": {},
-		"gpt-5.2":          {},
+		"gemma-3-27b":          {},
+		"gpt-5.3-codex":        {},
+		"llama-4-scout":        {},
+		"deepseek-v3-0324":     {},
+		"gpt-5.2":              {},
+		"llama-3.1-8b-instant": {}, // cheapest + lowest-latency entry in the catalog — the honest zero-hint winner
 	}
 	if _, ok := allowed[got]; !ok {
 		t.Fatalf("unexpected zero-hint pick %q (want a cheap / low-latency default)", got)
