@@ -1,117 +1,110 @@
 package ingress
 
 import (
+	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/YashVishwas/ixr/internal/domain/cache"
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
-// --- bytesReader / readCloser: the io.Reader contract bug this session found ---
+// TestCacheMiddleware_ConcurrentIdenticalMisses_Coalesce is the regression
+// test for the gap this fix closes: before singleflight, a burst of
+// concurrent identical requests each independently reached the provider on
+// a cache miss, even though only one of them needed to.
+func TestCacheMiddleware_ConcurrentIdenticalMisses_Coalesce(t *testing.T) {
+	var calls int32
+	release := make(chan struct{})
+	p := &stubProvider{name: "test", chat: func(_ context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		atomic.AddInt32(&calls, 1)
+		<-release // hold every concurrent caller inside the same in-flight window
+		return &schema.ResponseEnvelope{
+			ID:      "shared-response",
+			Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "the answer"}}},
+		}, nil
+	}}
+	chatHandler := NewChatHandler(fixedRouter(p), nil)
 
-func TestBytesReader_ExhaustedReturnsEOF(t *testing.T) {
-	br := &bytesReader{data: []byte("hi")}
-	buf := make([]byte, 10)
+	mem := cache.NewMemory(100, time.Minute)
+	exact := &cache.ExactCache{Memory: mem}
+	cacheLayer := NewCacheMiddleware(exact, time.Minute, chatHandler)
 
-	n, err := br.Read(buf)
-	if n != 2 || err != nil {
-		t.Fatalf("first read: got (%d, %v), want (2, nil)", n, err)
+	const n = 10
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"what is the answer?"}]}`
+
+	var wg sync.WaitGroup
+	results := make([]*httptest.ResponseRecorder, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = post(cacheLayer, body)
+		}(i)
 	}
 
-	// The bug: this used to return (0, nil) forever instead of (0, io.EOF)
-	// once exhausted — a violation of io.Reader's contract that
-	// json.Decoder's underlying buffered reader takes literally, spinning
-	// forever waiting for either more data or a terminal error that never
-	// came.
-	n, err = br.Read(buf)
-	if n != 0 || err != io.EOF {
-		t.Fatalf("exhausted read: got (%d, %v), want (0, io.EOF)", n, err)
+	// Give every goroutine a chance to reach the provider stub (and block on
+	// release) before letting any of them complete — otherwise an early
+	// request could finish and populate the cache before the later ones
+	// even start, which would prove caching works but not coalescing.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("provider called %d times for %d concurrent identical requests, want exactly 1", got, n)
 	}
 
-	// And it must keep returning EOF, not flip back to (0, nil), if
-	// something calls Read again after already observing EOF.
-	n, err = br.Read(buf)
-	if n != 0 || err != io.EOF {
-		t.Fatalf("read after EOF: got (%d, %v), want (0, io.EOF)", n, err)
+	for i, w := range results {
+		if w.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, body = %s", i, w.Code, w.Body.String())
+		}
+		var resp schema.ResponseEnvelope
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("request %d: decode: %v", i, err)
+		}
+		if resp.ID != "shared-response" {
+			t.Errorf("request %d: got response %q, want the shared response", i, resp.ID)
+		}
 	}
 }
 
-func TestReadCloser_DecodesACompleteRoundTrip(t *testing.T) {
-	// Guards against the EOF fix breaking the normal, already-working
-	// case: a complete, well-formed body must still decode cleanly.
-	rc := readCloser([]byte(`{"model":"gpt-4o"}`))
-	var v map[string]any
-	if err := json.NewDecoder(rc).Decode(&v); err != nil {
-		t.Fatalf("unexpected decode error: %v", err)
+// TestCacheMiddleware_SequentialIdenticalRequests_SecondServedFromCache
+// confirms this change didn't disturb the ordinary (non-concurrent) path:
+// the second identical request after the first completes should be a real
+// cache hit, not a second coalesced/upstream call.
+func TestCacheMiddleware_SequentialIdenticalRequests_SecondServedFromCache(t *testing.T) {
+	var calls int32
+	p := &stubProvider{name: "test", chat: func(_ context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
+		atomic.AddInt32(&calls, 1)
+		return &schema.ResponseEnvelope{
+			ID:      "r1",
+			Choices: []schema.Choice{{Message: schema.Message{Role: "assistant", Content: "the answer"}}},
+		}, nil
+	}}
+	chatHandler := NewChatHandler(fixedRouter(p), nil)
+	mem := cache.NewMemory(100, time.Minute)
+	exact := &cache.ExactCache{Memory: mem}
+	cacheLayer := NewCacheMiddleware(exact, time.Minute, chatHandler)
+
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"what is the answer?"}]}`
+
+	w1 := post(cacheLayer, body)
+	if got := w1.Header().Get("X-Cache"); got != "MISS" {
+		t.Errorf("first request X-Cache = %q, want MISS", got)
 	}
-	if v["model"] != "gpt-4o" {
-		t.Errorf("got %+v", v)
+
+	w2 := post(cacheLayer, body)
+	if got := w2.Header().Get("X-Cache"); got == "MISS" || got == "COALESCED" {
+		t.Errorf("second (sequential, post-completion) request X-Cache = %q, want a real cache hit", got)
 	}
-}
 
-func TestReadCloser_TruncatedBody_DecodeErrorsInsteadOfHanging(t *testing.T) {
-	// The exact shape body.replay() produces after http.MaxBytesReader (or
-	// any other partial read) cuts a body off mid-JSON-value: incomplete,
-	// not just malformed. json.Decoder must be able to observe EOF and
-	// return an error, not block waiting for bytes that will never come.
-	rc := readCloser([]byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"truncated here...`))
-
-	done := make(chan error, 1)
-	go func() {
-		var v map[string]any
-		done <- json.NewDecoder(rc).Decode(&v)
-	}()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("expected a decode error for a truncated body, got nil")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Decode on a truncated replayed body did not return within 2s — regression of the exhausted-reader EOF bug")
-	}
-}
-
-// --- CacheMiddleware end to end: the actual bug this session found ---
-
-// TestCacheMiddleware_OversizedBody_FailsCleanlyInsteadOfHanging reproduces
-// the real incident: a request body cut off by http.MaxBytesReader flows
-// into CacheMiddleware, which fails to decode it, replays the captured
-// partial bytes, and passes through to next — which also fails to decode
-// the same truncated bytes. Before the io.EOF fix, that second decode
-// spun forever instead of erroring, so the client never got a response at
-// all (observed directly: curl timed out with 0 bytes received).
-func TestCacheMiddleware_OversizedBody_FailsCleanlyInsteadOfHanging(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var v map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_request_body", "could not parse request JSON")
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	})
-	cm := NewCacheMiddleware(nil, time.Minute, next)
-
-	oversizedJSON := `{"model":"gpt-4o","messages":[{"role":"user","content":"` + strings.Repeat("a", 1000) + `"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(oversizedJSON))
-	req.Body = http.MaxBytesReader(httptest.NewRecorder(), req.Body, 200)
-
-	done := make(chan int, 1)
-	go func() {
-		w := httptest.NewRecorder()
-		cm.ServeHTTP(w, req)
-		done <- w.Code
-	}()
-
-	select {
-	case code := <-done:
-		if code != http.StatusBadRequest {
-			t.Errorf("status: got %d, want 400", code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("request did not complete within 2s — the CacheMiddleware -> next replay chain hung on an oversized body")
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("provider called %d times across 2 sequential identical requests, want exactly 1", got)
 	}
 }

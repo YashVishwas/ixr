@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -387,6 +389,202 @@ func TestSemanticCache_ConcurrentLookupAndStore(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// --- SemanticCache quality tier ---
+
+// fakeQualityEmbedder stands in for a real provider-backed embedder
+// (ProviderEmbedder wrapping e.g. OpenAI). It deliberately does NOT embed by
+// word-overlap the way WordVectorizer does — instead it canonicalizes text
+// through a synonym table first, so two lexically unrelated paraphrases can
+// land on the same vector, the way a real semantic embedding model would but
+// a bag-of-words approximation structurally cannot. That's the property the
+// tests below rely on to prove the quality tier adds something the fast tier
+// couldn't already do. It also produces a different dimension than
+// WordVectorizer's, so a test that accidentally compared vectors across
+// tiers would fail loudly via TestCosineSimilarity_DimMismatch semantics
+// rather than silently appearing to work.
+type fakeQualityEmbedder struct {
+	delay time.Duration
+	err   error
+}
+
+const fakeQualityDim = 8
+
+// canonicalize collapses known paraphrase families onto one representative
+// token before embedding, standing in for whatever a real embedding model
+// would do implicitly.
+func (f fakeQualityEmbedder) canonicalize(text string) string {
+	synonyms := map[string]string{
+		"tldr":     "summarize",
+		"condense": "summarize",
+		"synopsis": "summary",
+	}
+	toks := tokenize(text)
+	for i, tok := range toks {
+		if canon, ok := synonyms[tok]; ok {
+			toks[i] = canon
+		}
+	}
+	return strings.Join(toks, " ")
+}
+
+func (f fakeQualityEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	vec := make([]float32, fakeQualityDim)
+	for _, tok := range tokenize(f.canonicalize(text)) {
+		h := fnv32a(tok) % fakeQualityDim
+		vec[h]++
+	}
+	l2Normalize(vec)
+	return vec, nil
+}
+
+func fnv32a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func mustEmbed(t *testing.T, e Embedder, text string) []float32 {
+	t.Helper()
+	vec, err := e.Embed(context.Background(), text)
+	if err != nil {
+		t.Fatalf("embed %q: %v", text, err)
+	}
+	return vec
+}
+
+// waitForLen polls until backend has at least n entries or timeout elapses,
+// synchronizing with SemanticCache.Store's fire-and-forget quality-tier
+// goroutine without an arbitrary fixed sleep.
+func waitForLen(t *testing.T, backend *MemorySemanticBackend, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if backend.Len() >= n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("backend did not reach %d entries within %s (got %d)", n, timeout, backend.Len())
+}
+
+func TestSemanticCache_QualityTier_CatchesParaphraseFastTierMisses(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	fastBackend := NewMemorySemanticBackend(100)
+	qualityBackend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, fastBackend, WordVectorizer{}, 0.92)
+	sc.WithQualityTier(fakeQualityEmbedder{}, qualityBackend, 100*time.Millisecond)
+	ctx := context.Background()
+
+	stored := makeReq("gpt-4o", "please summarize this for me")
+	sc.Store(ctx, stored, makeResp("quality-hit"), time.Minute)
+	waitForLen(t, qualityBackend, 1, time.Second)
+
+	// A one-word paraphrase ("tldr" for "summarize") that scores below the
+	// fast tier's 0.92 threshold on raw token overlap (4 of 5 tokens match:
+	// cosine = 4/5 = 0.8), but that the quality tier's canonicalization
+	// recognizes as identical after mapping "tldr" -> "summarize".
+	if score := cosineSimilarity(mustEmbed(t, WordVectorizer{}, "please summarize this for me"), mustEmbed(t, WordVectorizer{}, "please tldr this for me")); score >= 0.92 {
+		t.Fatalf("test setup invalid: fast tier would already match on its own (score=%f) — quality-tier fallback wouldn't be exercised", score)
+	}
+
+	query := makeReq("gpt-4o", "please tldr this for me")
+	got, hit, ok := sc.Lookup(ctx, query)
+	if !ok {
+		t.Fatal("expected quality-tier hit")
+	}
+	if hit != CacheHitSemantic {
+		t.Fatalf("expected CacheHitSemantic, got %v", hit)
+	}
+	if got.ID != "quality-hit" {
+		t.Fatalf("got ID=%q, want quality-hit", got.ID)
+	}
+}
+
+func TestSemanticCache_QualityTier_NotConsultedOnFastHit(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	fastBackend := NewMemorySemanticBackend(100)
+	qualityBackend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, fastBackend, WordVectorizer{}, 0.92)
+	// A quality embedder that always errors — if Lookup incorrectly consulted
+	// it even on a fast-tier hit, this would surface as a test failure only
+	// if the error were allowed to affect the result. It must not be called.
+	sc.WithQualityTier(fakeQualityEmbedder{err: fmt.Errorf("should not be called")}, qualityBackend, 100*time.Millisecond)
+	ctx := context.Background()
+
+	req := makeReq("gpt-4o", "hello exact")
+	resp := makeResp("exact-hit")
+	sc.Store(ctx, req, resp, time.Minute)
+
+	got, hit, ok := sc.Lookup(ctx, req)
+	if !ok || hit != CacheHitExact {
+		t.Fatalf("expected exact hit, got hit=%v ok=%v", hit, ok)
+	}
+	if got.ID != "exact-hit" {
+		t.Fatalf("got ID=%q, want exact-hit", got.ID)
+	}
+}
+
+func TestSemanticCache_QualityTier_MissWhenNotConfigured(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	fastBackend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, fastBackend, WordVectorizer{}, 0.92)
+	ctx := context.Background()
+
+	sc.Store(ctx, makeReq("gpt-4o", "summarize this"), makeResp("r1"), time.Minute)
+
+	// No quality tier configured (default, back-compat) — an otherwise
+	// quality-tier-catchable paraphrase should behave exactly as before this
+	// feature existed: a miss once the fast tier misses.
+	_, hit, ok := sc.Lookup(ctx, makeReq("gpt-4o", "write a haiku about mountains"))
+	if ok {
+		t.Fatal("expected miss with no quality tier configured")
+	}
+	if hit != CacheHitNone {
+		t.Fatalf("expected CacheHitNone, got %v", hit)
+	}
+}
+
+func TestSemanticCache_QualityTier_LookupRespectsTimeout(t *testing.T) {
+	mem := NewMemory(100, time.Minute)
+	exact := &ExactCache{mem}
+	fastBackend := NewMemorySemanticBackend(100)
+	qualityBackend := NewMemorySemanticBackend(100)
+	sc := NewSemanticCache(exact, fastBackend, WordVectorizer{}, 0.92)
+	// Embedder deliberately slower than the configured timeout.
+	sc.WithQualityTier(fakeQualityEmbedder{delay: 50 * time.Millisecond}, qualityBackend, 5*time.Millisecond)
+	ctx := context.Background()
+
+	start := time.Now()
+	_, hit, ok := sc.Lookup(ctx, makeReq("gpt-4o", "anything, fast tier misses too"))
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatal("expected miss when quality embedder exceeds lookupTimeout")
+	}
+	if hit != CacheHitNone {
+		t.Fatalf("expected CacheHitNone, got %v", hit)
+	}
+	if elapsed > 40*time.Millisecond {
+		t.Fatalf("Lookup took %s, expected it to be bounded by the 5ms quality timeout, not the embedder's 50ms delay", elapsed)
+	}
 }
 
 func TestCacheHit_String(t *testing.T) {
