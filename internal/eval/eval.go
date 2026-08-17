@@ -122,7 +122,7 @@ func Run(ctx context.Context, set *Set, models []string, chat ChatFunc) []Result
 			r.Passed = Score(q, r.Response)
 			r.PromptTok = resp.Usage.PromptTokens
 			r.OutputTok = resp.Usage.CompletionTokens
-			r.Cost = cost.ForUsage(resp.Model, r.PromptTok, r.OutputTok)
+			r.Cost = cost.ForUsage(resp.Model, resp.Usage)
 			results = append(results, r)
 		}
 	}
