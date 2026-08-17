@@ -67,10 +67,19 @@ func (o *Orchestrator) RunShadow(bgCtx context.Context, req *schema.RequestEnvel
 				if latency < 2*time.Second {
 					reward += 0.3
 				}
+				// Quality bonus, kept in lockstep with
+				// plugins/banditreward's identical formula: both write into
+				// the same shared bandit instance (see pkg/ixr.Start), so
+				// letting one add a quality term the other doesn't would
+				// bias arm statistics between primary and shadow traffic
+				// for reasons having nothing to do with actual quality.
+				var choices []schema.Choice
+				if resp != nil {
+					choices = resp.Choices
+				}
+				reward += o.weights.Delta * QualityFromFinishReason(choices)
 				o.bandit.Update(model, reward)
 			}
-
-			_ = resp
 		}()
 	}
 }

@@ -22,6 +22,7 @@ import (
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	"github.com/YashVishwas/ixr/plugins/banditreward"
+	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
 	"github.com/YashVishwas/ixr/plugins/compressor"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
@@ -94,6 +95,12 @@ func Start(opts ...Option) error {
 	if err != nil {
 		return err
 	}
+
+	// log_level was parsed into Config but never actually applied to the
+	// logger anywhere — every deployment ran at Info regardless of what was
+	// configured, silently dropping Debug-level diagnostics (the routing
+	// decision logging below included).
+	slog.SetLogLoggerLevel(logLevelFromConfig(fileCfg))
 
 	// --- Observability ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -183,7 +190,28 @@ func Start(opts ...Option) error {
 		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
 		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
 		defer semanticBackend.Close()
-		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+		semanticCache := cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+
+		// Quality tier (opt-in): catches paraphrase-level matches the fast
+		// WordVectorizer token-overlap approximation misses (e.g. "summarize
+		// this" vs "give me a summary"), by embedding through a real
+		// provider on Store (async, off the request path) and consulting it
+		// on Lookup only as a fallback after the fast tier misses, bounded by
+		// IXR_CACHE_QUALITY_TIMEOUT_MS rather than the fast path's fixed 5ms.
+		// Requires an OpenAI provider to already be configured — this reuses
+		// that adapter rather than standing up a separate credential path.
+		if os.Getenv("IXR_CACHE_QUALITY_EMBEDDER") == "true" {
+			if embedder, ok := registry["openai"].(provider.Embedder); ok {
+				model := envString("IXR_CACHE_QUALITY_MODEL", "text-embedding-3-small")
+				qualityBackend := cache.NewMemorySemanticBackend(cacheSize)
+				timeout := time.Duration(envInt("IXR_CACHE_QUALITY_TIMEOUT_MS", 150)) * time.Millisecond
+				semanticCache.WithQualityTier(cache.ProviderEmbedder{Provider: embedder, Model: model}, qualityBackend, timeout)
+			} else {
+				slog.Warn("IXR_CACHE_QUALITY_EMBEDDER=true but no OpenAI provider is configured; quality tier disabled")
+			}
+		}
+
+		responseCache = semanticCache
 	}
 
 	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
@@ -270,15 +298,13 @@ func Start(opts ...Option) error {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
 	}
 
-	// Request compression (opt-in): shrinks oversized tool-result/history
-	// content before routing, caching, or the provider ever see it.
-	// guardrail.RequestInterceptor already runs pre-cache/pre-routing and
-	// InterceptorMiddleware already re-marshals a mutated req back into the
-	// body, so this reuses that existing extension point rather than adding
-	// a new one — see plugins/compressor's package doc for why.
-	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" {
-		maxChars := envInt("IXR_COMPRESS_MAX_CHARS", 0) // 0 → compressor.New's own default
-		interceptors = append(interceptors, compressor.New(maxChars))
+	// Output-side brevity steering (opt-in): appends a terseness instruction
+	// to the system message so the model favors fragments over prose,
+	// trimming output tokens — the counterpart to input-side compression.
+	// Whether it actually reduces tokens is model behavior, not something
+	// this wiring can guarantee; see plugins/brevity's package doc.
+	if os.Getenv("IXR_TERSE_OUTPUT") == "true" {
+		interceptors = append(interceptors, brevity.New(os.Getenv("IXR_TERSE_INSTRUCTION")))
 	}
 
 	// --- Session store (optional) ---
@@ -403,6 +429,13 @@ func envFloat(key string, def float64) float64 {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
+	}
+	return def
+}
+
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
 	return def
 }
@@ -538,6 +571,26 @@ func buildRouter(registry map[string]provider.Provider) ingress.Router {
 		default:
 			return nil, fmt.Errorf("no provider found for model %q", model)
 		}
+	}
+}
+
+// logLevelFromConfig maps the config's log_level string to a slog.Level.
+// Defaults to Info — same as slog's own zero-value default — when no config
+// file was used or log_level wasn't set.
+func logLevelFromConfig(fileCfg *cfgloader.Config) slog.Level {
+	level := ""
+	if fileCfg != nil {
+		level = fileCfg.LogLevel
+	}
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 
