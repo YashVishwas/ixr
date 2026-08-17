@@ -61,13 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried. Observability only — does not change routing behavior.
 
 ### Fixed
-- `go vet ./...` was failing on `main`: `internal/eval/eval.go` called
-  `cost.ForUsage(model, promptTokens, outputTokens)`, the pre-prompt-caching
-  signature. `feat/routing-eval-harness` (which added `internal/eval`) and
-  the Anthropic prompt-cache cost-accounting work (which changed `ForUsage`
-  to take a single `schema.Usage`) were developed in parallel and never
-  cross-checked, so the mismatch only surfaced once both merged. Now passes
-  `resp.Usage` directly instead of extracting two ints from it.
+- `go vet ./...` was failing on `main`: `TestToWireRequest_MultipleSystemMessagesConcatenated`
+  (`internal/adapters/providers/anthropic/translate_test.go`) predated two
+  later signature/type changes — `toWireRequest` gained a `historyLen int`
+  param, and `wireRequest.System` changed from `string` to `[]wireContent`
+  (for prompt-caching `cache_control` support) — and was never updated.
+  Blocked CI on every PR into `main`, independent of any branch merge.
 - Circuit breaker outcome recording conflated a caller giving up
   (`context.Canceled`/`context.DeadlineExceeded`) with the provider actually
   failing — all four `RecordOutcome` call sites (`chat.go` and `chain.go`,
