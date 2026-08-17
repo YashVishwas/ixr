@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried. Observability only — does not change routing behavior.
 
 ### Fixed
+- `go vet ./...` was failing on `main`: `TestToWireRequest_MultipleSystemMessagesConcatenated`
+  (`internal/adapters/providers/anthropic/translate_test.go`) predated two
+  later signature/type changes — `toWireRequest` gained a `historyLen int`
+  param, and `wireRequest.System` changed from `string` to `[]wireContent`
+  (for prompt-caching `cache_control` support) — and was never updated.
+  Blocked CI on every PR into `main`, independent of any branch merge.
 - Circuit breaker outcome recording conflated a caller giving up
   (`context.Canceled`/`context.DeadlineExceeded`) with the provider actually
   failing — all four `RecordOutcome` call sites (`chat.go` and `chain.go`,

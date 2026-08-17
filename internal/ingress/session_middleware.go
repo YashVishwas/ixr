@@ -33,8 +33,11 @@ const (
 // server generates a UUID and returns it in the response header so the client
 // can use it on subsequent requests.
 //
-// Streaming requests (req.Stream=true) receive history injection but the
-// response is not captured — buffering an SSE stream would defeat its purpose.
+// Streaming requests (req.Stream=true) receive history injection and the
+// assistant's full reply is still captured — see sseCaptureWriter and
+// parseSSEAssistantTurn (session_stream_capture.go) — by teeing bytes to
+// the client in real time rather than buffering the stream itself, so
+// capture adds no latency to what the client sees.
 type SessionMiddleware struct {
 	store session.SessionStore
 	next  http.Handler
@@ -97,9 +100,19 @@ func (m *SessionMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 7. Echo the session ID in the response so the client can persist it.
 	w.Header().Set(headerSessionID, sessionID)
 
-	// 8. Streaming: history is injected above but we can't capture the SSE response.
+	// 8. Streaming: history is injected above; the response is captured via
+	// sseCaptureWriter, which tees bytes to the real client in real time
+	// (zero added latency — see its doc comment) while also buffering them
+	// for a post-stream parse pass, so the new user+assistant turn still
+	// gets persisted the same as the non-streaming path below.
 	if req.Stream {
-		m.next.ServeHTTP(w, r)
+		capture := &sseCaptureWriter{ResponseWriter: w}
+		m.next.ServeHTTP(capture, r)
+
+		if assistantTurn, ok := parseSSEAssistantTurn(capture.buf.Bytes()); ok {
+			userTurn := lastUserMessage(req.Messages, historyLen)
+			m.store.Append(r.Context(), storeKey, userTurn, assistantTurn)
+		}
 		return
 	}
 
