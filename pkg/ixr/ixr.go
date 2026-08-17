@@ -48,6 +48,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
+	"github.com/YashVishwas/ixr/internal/adapters/store/retrievalstore"
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
@@ -64,6 +65,7 @@ import (
 	pkgguardrail "github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 )
 
 // Option configures the ixr instance.
