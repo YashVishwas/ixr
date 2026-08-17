@@ -3,8 +3,10 @@
 // via the bandit instead of the deterministic top score, but the bandit only
 // improves if something reports back how each pick actually performed. This
 // plugin is that something — it watches the event bus for auto-routed calls
-// and calls Bandit.Update with a reward computed from success/latency, the
-// same formula scoring.Orchestrator (shadow routing) already uses.
+// and calls Bandit.Update with a reward computed from success, latency, and
+// a finish-reason-derived quality signal — the same formula
+// scoring.Orchestrator (shadow routing) already uses, since both write into
+// one shared bandit instance and must stay in sync.
 package banditreward
 
 import (
@@ -44,6 +46,13 @@ func (p *Plugin) OnEvent(_ context.Context, ev *schema.CallEvent) error {
 	if time.Duration(ev.Latency) < 2*time.Second {
 		reward += 0.3
 	}
+	// Quality bonus on top of the success/latency base above — additive
+	// rather than folded into the 0.7/0.3 split so bandit.go's
+	// failureRewardThreshold (calibrated to that split) keeps classifying
+	// success/failure exactly as before: 0 quality contribution when there's
+	// no response to read a finish reason from (this plugin's pre-existing
+	// behavior for such events) leaves old callers' reward values unchanged.
+	reward += scoring.DefaultRewardWeights.Delta * scoring.QualityFromFinishReason(ev.Response.Choices)
 	p.bandit.Update(ev.Model, reward)
 	return nil
 }
