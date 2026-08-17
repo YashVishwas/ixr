@@ -11,9 +11,12 @@ import (
 // Anthropic Messages API wire types — internal to this adapter.
 
 type wireRequest struct {
-	Model      string          `json:"model"`
-	Messages   []wireMessage   `json:"messages"`
-	System     string          `json:"system,omitempty"`
+	Model    string        `json:"model"`
+	Messages []wireMessage `json:"messages"`
+	// System is the array-of-content-blocks form. Anthropic also accepts a
+	// bare string, but the array form is required to attach cache_control
+	// to it — see maybeCacheSystemBlock.
+	System     []wireContent   `json:"system,omitempty"`
 	MaxTokens  int             `json:"max_tokens"`
 	Stream     bool            `json:"stream,omitempty"`
 	Tools      []wireTool      `json:"tools,omitempty"`
@@ -42,6 +45,16 @@ type wireContent struct {
 	Content   string           `json:"content,omitempty"`
 	IsError   bool             `json:"is_error,omitempty"`
 	Source    *wireImageSource `json:"source,omitempty"`
+	// CacheControl marks this block as a prompt-cache breakpoint: Anthropic
+	// bills a repeated prefix ending at this block ~90% cheaper on
+	// subsequent calls that reuse it. Only set on the system block today —
+	// see maybeCacheSystemBlock.
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
+}
+
+// wireCacheControl is Anthropic's prompt-caching marker.
+type wireCacheControl struct {
+	Type string `json:"type"` // "ephemeral" — the only type Anthropic currently defines
 }
 
 // wireImageSource is Anthropic's image content-block source: either
@@ -78,8 +91,10 @@ type wireResponse struct {
 }
 
 type wireUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 const defaultMaxTokens = 4096
@@ -139,10 +154,20 @@ type streamMessageDelta struct {
 
 // toWireRequest converts ixr's canonical envelope to the Anthropic Messages API format.
 // System messages are lifted out of the messages array into the top-level system field,
-// as required by the Anthropic API. Anthropic has no role="tool" — consecutive tool
+// as required by the Anthropic API — multiple system-role messages are concatenated in
+// order, not just the last one kept. Anthropic has no role="tool" — consecutive tool
 // result messages are coalesced into a single role="user" message with one
 // tool_result content block per result, which the API requires.
-func toWireRequest(req *schema.RequestEnvelope) wireRequest {
+//
+// historyLen is the number of leading req.Messages entries that are
+// SessionMiddleware-injected history from prior turns rather than this
+// turn's new content (see internal/domain/cache.WithHistoryLen and
+// internal/ingress/session_middleware.go) — 0 when there's no session or
+// no history yet. When positive, the last message within that prefix gets
+// a cache_control breakpoint (see markHistoryCacheBreakpoint) so a growing
+// multi-turn conversation's stable prefix is cached across turns, not just
+// the system prompt.
+func toWireRequest(req *schema.RequestEnvelope, historyLen int) wireRequest {
 	var system string
 	var msgs []wireMessage
 	var pendingResults []wireContent
@@ -166,7 +191,16 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 		flushResults()
 
 		if m.Role == "system" {
-			system = m.Content
+			// Concatenate rather than overwrite: a request can legitimately
+			// carry more than one system-role message (e.g.
+			// MemoryMiddleware prepends a user-facts system message ahead
+			// of the caller's own one) — overwriting silently dropped every
+			// system message but the last.
+			if system != "" {
+				system += "\n\n" + m.Content
+			} else {
+				system = m.Content
+			}
 			continue
 		}
 
@@ -196,14 +230,98 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 	}
 	flushResults()
 
+	markHistoryCacheBreakpoint(msgs, historyLen, req.Model)
+
+	var systemBlocks []wireContent
+	if system != "" {
+		systemBlocks = []wireContent{maybeCacheSystemBlock(req.Model, system)}
+	}
+
 	return wireRequest{
 		Model:      req.Model,
 		Messages:   msgs,
-		System:     system,
+		System:     systemBlocks,
 		MaxTokens:  defaultMaxTokens,
 		Tools:      toWireTools(req.Tools),
 		ToolChoice: toWireToolChoice(req.ToolChoice),
 	}
+}
+
+// minCacheableTokens is Anthropic's minimum prompt length eligible for
+// cache_control: 2048 tokens for Haiku models, 1024 for everything else
+// (Sonnet, Opus). Marking a shorter block wastes the write (Anthropic still
+// bills the initial cache write at a premium) for no future benefit.
+func minCacheableTokens(model string) int {
+	if strings.Contains(strings.ToLower(model), "haiku") {
+		return 2048
+	}
+	return 1024
+}
+
+// estimateTokens approximates token count using the same rule of thumb
+// already used elsewhere in ixr (internal/ingress/session_middleware.go):
+// 1 token ≈ 4 characters.
+func estimateTokens(text string) int {
+	return len(text) / 4
+}
+
+// maybeCacheSystemBlock marks the system prompt as a cache_control
+// breakpoint when it's long enough to clear Anthropic's minimum — a
+// repeated system prompt (or static RAG/tool-def context baked into it) is
+// then billed at ~10% of normal input cost on every subsequent call that
+// reuses it, even when the final user turn is novel. Below the minimum,
+// caching would just add a wasted cache-write premium with no reuse benefit.
+func maybeCacheSystemBlock(model, system string) wireContent {
+	block := wireContent{Type: "text", Text: system}
+	if estimateTokens(system) >= minCacheableTokens(model) {
+		block.CacheControl = &wireCacheControl{Type: "ephemeral"}
+	}
+	return block
+}
+
+// markHistoryCacheBreakpoint marks the last message within the
+// session-injected history prefix as a cache_control breakpoint, so a
+// growing multi-turn conversation's history is cached across turns the same
+// way the system prompt already is — this is what Anthropic (and Headroom,
+// under the name "live-zone compression") mean by caching everything except
+// the newest turn.
+//
+// Assumes the first historyLen entries of msgs correspond 1:1, in order, to
+// the first historyLen entries of req.Messages — true for
+// SessionMiddleware's actual output (internal/ingress/session_middleware.go
+// only ever stores clean [user, assistant] pairs, never system or tool
+// messages, so nothing in that prefix triggers toWireRequest's tool-result
+// coalescing or system-message extraction). If a caller bypasses
+// SessionMiddleware and hand-assembles multi-turn history into one request,
+// this assumption can break down — the result is a suboptimal cache split
+// (wrong boundary, or marking a tool-coalesced block), not a correctness
+// bug: cache_control placement has no effect on what's actually sent to the
+// model, only on cost/latency.
+//
+// plugins/compressor can never invalidate this: it runs before
+// SessionMiddleware injects history (see that package's doc), so it never
+// sees or touches session-stored messages at all — only the caller's new
+// turn for the current request.
+func markHistoryCacheBreakpoint(msgs []wireMessage, historyLen int, model string) {
+	if historyLen <= 0 || historyLen > len(msgs) {
+		return
+	}
+
+	var totalChars int
+	for _, m := range msgs[:historyLen] {
+		for _, c := range m.Content {
+			totalChars += len(c.Text) + len(c.Content)
+		}
+	}
+	if totalChars/4 < minCacheableTokens(model) {
+		return
+	}
+
+	blocks := msgs[historyLen-1].Content
+	if len(blocks) == 0 {
+		return
+	}
+	blocks[len(blocks)-1].CacheControl = &wireCacheControl{Type: "ephemeral"}
 }
 
 // toWireContentBlocks converts a message's content into Anthropic content
@@ -316,12 +434,25 @@ func fromWireResponse(wr *wireResponse) (*schema.ResponseEnvelope, error) {
 				FinishReason: finish,
 			},
 		},
-		Usage: schema.Usage{
-			PromptTokens:     wr.Usage.InputTokens,
-			CompletionTokens: wr.Usage.OutputTokens,
-			TotalTokens:      wr.Usage.InputTokens + wr.Usage.OutputTokens,
-		},
+		Usage: usageFromWire(wr.Usage),
 	}, nil
+}
+
+// usageFromWire converts Anthropic's usage shape to ixr's canonical Usage.
+// Anthropic reports input_tokens as only the non-cached portion of the
+// prompt — cache_creation_input_tokens and cache_read_input_tokens are
+// separate, additive counts — so PromptTokens must sum all three to mean
+// the same thing it does for every other provider: the full prompt token
+// count.
+func usageFromWire(u wireUsage) schema.Usage {
+	promptTokens := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	return schema.Usage{
+		PromptTokens:             promptTokens,
+		CompletionTokens:         u.OutputTokens,
+		TotalTokens:              promptTokens + u.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens,
+	}
 }
 
 // splitContent separates a response's text and tool_use blocks. A

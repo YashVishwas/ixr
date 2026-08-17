@@ -128,4 +128,15 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CacheReadInputTokens and CacheCreationInputTokens report Anthropic
+	// prompt-caching activity (0 for providers that don't support it, or
+	// when no cache_control block was sent). PromptTokens already includes
+	// these — they're a breakdown, not additional tokens — so
+	// cost.ForUsage, which prices PromptTokens uniformly at the full input
+	// rate, currently overstates cost for calls with a nonzero
+	// CacheReadInputTokens (Anthropic bills cache reads at ~10% of the
+	// normal input rate). Surfaced here for observability; not yet wired
+	// into cost accounting.
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }

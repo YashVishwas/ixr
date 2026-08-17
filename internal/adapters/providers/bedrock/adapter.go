@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,11 +23,11 @@ import (
 
 // Adapter calls AWS Bedrock's InvokeModel API using raw SigV4-signed HTTP.
 type Adapter struct {
-	region    string
-	accessKey string
-	secretKey string
+	region       string
+	accessKey    string
+	secretKey    string
 	sessionToken string
-	client    *http.Client
+	client       *http.Client
 }
 
 // New creates a Bedrock adapter.
@@ -76,66 +75,177 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 	return a.parseResponse(req.Model, respBody)
 }
 
-// Stream is not yet implemented for Bedrock — falls back to a Chat call.
+// Stream calls Bedrock's InvokeModelWithResponseStream endpoint, which
+// returns an "application/vnd.amazon.eventstream"-framed response (AWS's
+// binary event-stream protocol — see eventstream.go) rather than SSE.
+// Bedrock wraps each inner Anthropic-shaped event (message_start,
+// content_block_delta, message_delta, message_stop — the same event
+// sequence and JSON field names as native Anthropic's streaming Messages
+// API, since this is the identical underlying model) in a "chunk" event
+// whose payload is itself JSON of the form {"bytes": "<base64>"}, where
+// the base64-decoded bytes are the inner event.
+//
+// Scope note: this mirrors parseResponse's existing capability level
+// (text content only) rather than adding tool-call streaming support that
+// doesn't exist in the non-streaming path either — Chat/parseResponse
+// today only extracts text content blocks from a response, silently
+// ignoring tool_use blocks. That's a separate, pre-existing gap, not
+// something this change expands scope to fix.
 func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
-	resp, err := a.Chat(ctx, req)
+	body, err := a.buildBody(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("bedrock: build body: %w", err)
 	}
-	if len(resp.Choices) > 0 {
-		_ = fn(provider.StreamChunk{
-			ID:           resp.ID,
-			Model:        resp.Model,
-			Delta:        schema.Message{Role: "assistant", Content: resp.Choices[0].Message.Content},
-			FinishReason: resp.Choices[0].FinishReason,
-			Usage:        &resp.Usage,
-		})
+
+	url := a.streamEndpointURL(req.Model)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("bedrock: build stream request: %w", err)
 	}
-	return nil
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/vnd.amazon.eventstream")
+
+	if err := a.sign(httpReq, body); err != nil {
+		return fmt.Errorf("bedrock: sign stream request: %w", err)
+	}
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("bedrock: do stream request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("bedrock: stream status %d: %s", resp.StatusCode, b)
+	}
+
+	return streamBedrockEvents(resp.Body, req.Model, fn)
 }
 
 func (a *Adapter) endpointURL(model string) string {
 	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke", a.region, model)
 }
 
+func (a *Adapter) streamEndpointURL(model string) string {
+	return fmt.Sprintf("https://bedrock-runtime.%s.amazonaws.com/model/%s/invoke-with-response-stream", a.region, model)
+}
+
+// contentBlock is Bedrock Claude's content-block shape — the same as
+// native Anthropic's Messages API: "text" (Text) or "image" (Source).
+type contentBlock struct {
+	Type   string       `json:"type"`
+	Text   string       `json:"text,omitempty"`
+	Source *imageSource `json:"source,omitempty"`
+}
+
+// imageSource mirrors native Anthropic's image content-block source:
+// inline base64 bytes or a URL Bedrock fetches itself.
+type imageSource struct {
+	Type      string `json:"type"` // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+type bedrockMessage struct {
+	Role    string         `json:"role"`
+	Content []contentBlock `json:"content"`
+}
+
 // buildBody converts the canonical request to the Bedrock Claude wire format.
-// This handles the Anthropic Claude family hosted on Bedrock.
+// This handles the Anthropic Claude family hosted on Bedrock — the same
+// wire shape as native Anthropic's Messages API, including a top-level
+// "system" string separate from "messages" and content-block arrays
+// (rather than a plain string) so image content translates too.
 // Other families (Llama, Nova) use different schemas — extend as needed.
 func (a *Adapter) buildBody(req *schema.RequestEnvelope) ([]byte, error) {
-	type message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
 	type bedrockReq struct {
-		AnthropicVersion string    `json:"anthropic_version"`
-		MaxTokens        int       `json:"max_tokens"`
-		Messages         []message `json:"messages"`
+		AnthropicVersion string           `json:"anthropic_version"`
+		MaxTokens        int              `json:"max_tokens"`
+		System           string           `json:"system,omitempty"`
+		Messages         []bedrockMessage `json:"messages"`
 	}
 
-	msgs := make([]message, 0, len(req.Messages))
+	var system string
+	msgs := make([]bedrockMessage, 0, len(req.Messages))
 	for _, m := range req.Messages {
 		if m.Role == "system" {
-			continue // system messages handled separately in full Anthropic Bedrock schema
+			// Lifted to the top-level System field below, not sent as a
+			// message — Bedrock's Claude endpoint rejects role="system" in
+			// the messages array, same as native Anthropic. Concatenate
+			// rather than overwrite: a request can legitimately carry more
+			// than one system-role message (e.g. MemoryMiddleware prepends
+			// a user-facts system message ahead of the caller's own one) —
+			// this used to silently drop every system message, always, via
+			// an unconditional `continue` with no System field to lift into
+			// at all.
+			if system != "" {
+				system += "\n\n" + m.Content
+			} else {
+				system = m.Content
+			}
+			continue
 		}
-		if len(m.Parts) > 0 {
-			// Vision (RFC Gap 10) isn't wired for this adapter yet — only
-			// OpenAI, openaicompat, and Anthropic translate m.Parts today.
-			// m.Content already carries the flattened text (see
-			// pkg/schema/content.go's UnmarshalJSON), so the request still
-			// goes through as text-only rather than erroring or sending a
-			// malformed body — but silently, with no signal to the caller
-			// that the image was dropped. Surface that here so it's at
-			// least visible to the operator instead of a mystery "why did
-			// the model ignore my image" support ticket.
-			slog.Warn("bedrock: message has image/multipart content but this adapter only forwards text; image dropped", "role", m.Role)
-		}
-		msgs = append(msgs, message{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, bedrockMessage{Role: m.Role, Content: toContentBlocks(m)})
 	}
 	return json.Marshal(bedrockReq{
 		AnthropicVersion: "bedrock-2023-05-31",
 		MaxTokens:        4096,
+		System:           system,
 		Messages:         msgs,
 	})
+}
+
+// toContentBlocks converts a message's content into Bedrock Claude content
+// blocks: a single text block for a plain-text message (the pre-existing
+// shape, unchanged), or one block per part — including images — for a
+// multimodal message. Mirrors internal/adapters/providers/anthropic's
+// toWireContentBlocks/toImageBlock, since Bedrock's Claude endpoint uses
+// the identical content-block shape.
+func toContentBlocks(m schema.Message) []contentBlock {
+	if len(m.Parts) == 0 {
+		return []contentBlock{{Type: "text", Text: m.Content}}
+	}
+	blocks := make([]contentBlock, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		switch p.Type {
+		case "text":
+			blocks = append(blocks, contentBlock{Type: "text", Text: p.Text})
+		case "image_url":
+			if p.ImageURL != nil {
+				blocks = append(blocks, toImageBlock(p.ImageURL.URL))
+			}
+		}
+	}
+	return blocks
+}
+
+// toImageBlock builds a Bedrock Claude image content block from an
+// image_url part's URL: a data: URI decodes into an inline base64 source
+// (media type + payload extracted directly, no re-encoding); any other URL
+// is passed as a "url" source, which Bedrock fetches itself.
+func toImageBlock(url string) contentBlock {
+	if mediaType, data, ok := parseDataURI(url); ok {
+		return contentBlock{Type: "image", Source: &imageSource{Type: "base64", MediaType: mediaType, Data: data}}
+	}
+	return contentBlock{Type: "image", Source: &imageSource{Type: "url", URL: url}}
+}
+
+// parseDataURI extracts the media type and base64 payload from a
+// "data:image/png;base64,AAAA..." URI.
+func parseDataURI(uri string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", false
+	}
+	rest := uri[len(prefix):]
+	const marker = ";base64,"
+	idx := strings.Index(rest, marker)
+	if idx < 0 {
+		return "", "", false
+	}
+	return rest[:idx], rest[idx+len(marker):], true
 }
 
 // parseResponse handles the Anthropic Claude Bedrock response format.
@@ -247,10 +357,10 @@ func hmacHex(key []byte, data string) string {
 
 func buildCanonicalHeaders(req *http.Request) (signedHeaders, canonicalHeaders string) {
 	headers := map[string]string{
-		"content-type":        req.Header.Get("Content-Type"),
-		"host":                req.Host,
+		"content-type":         req.Header.Get("Content-Type"),
+		"host":                 req.Host,
 		"x-amz-content-sha256": req.Header.Get("X-Amz-Content-Sha256"),
-		"x-amz-date":          req.Header.Get("X-Amz-Date"),
+		"x-amz-date":           req.Header.Get("X-Amz-Date"),
 	}
 	if tok := req.Header.Get("X-Amz-Security-Token"); tok != "" {
 		headers["x-amz-security-token"] = tok
