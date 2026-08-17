@@ -143,14 +143,31 @@ func Start(opts ...Option) error {
 		cbRegistry.WithStateStore(cbstate.New(cbRedisClient, cbTTL))
 	}
 
-	// --- Scoring engine ---
-	scoringEngine := scoring.NewEngine(perfStore, policyMem, routing.Catalog())
-
 	// --- Identity resolver ---
 	resolver := &identity.Resolver{}
 
 	// --- Router (model name → provider) ---
 	router := buildRouter(registry)
+
+	// --- Scoring engine ---
+	// model:"auto" used to score against the full routing catalog
+	// regardless of which providers this deployment actually configures.
+	// A catalog entry whose provider isn't configured can still win the
+	// score, and chat.go has no recovery for that: the fallback chain it
+	// builds only helps when a provider resolved but then failed at
+	// runtime (timeout, rate limit, 5xx) — a provider that never resolved
+	// at all short-circuits to a 400 before Execute (the only thing that
+	// walks the fallback chain) is ever called. Net effect: any deployment
+	// configuring fewer providers than the full catalog assumes — which is
+	// most real deployments — had "auto" routinely fail outright instead
+	// of falling back to something it could actually serve.
+	//
+	// Filtering the catalog to only provider-configured entries here,
+	// reusing buildRouter's own resolution logic rather than a second,
+	// separately-maintained availability check, means "auto" can only
+	// ever pick (and only ever build a fallback chain from) something
+	// this deployment can actually serve.
+	scoringEngine := scoring.NewEngine(perfStore, policyMem, availableCatalog(routing.Catalog(), router))
 
 	// --- User memory store (optional) ---
 	// Bounded by default (1h TTL, 50 entries/user, journal recompacted every

@@ -234,6 +234,68 @@ var catalog = []ModelCard{
 		Multilingual:   0.72,
 		ContextWindow:  128_000,
 	},
+	// The three entries below are the models wayfinder's public Playground
+	// demo actually configures (Cerebras, Groq, Mistral) — added so
+	// model:"auto" has real candidates to pick from on a deployment that
+	// doesn't configure the frontier providers the rest of this catalog
+	// assumes. Pricing matches wayfinder/playground/internal/catalog.go's
+	// verified figures (sourced 2026-07-28 from each provider's own pricing
+	// page — see that file for links). Capability priors are estimated at
+	// the same honest epistemic status as the rest of this catalog, not
+	// inflated to win against a frontier model when one's configured: a
+	// small/fast model routed here for its price and latency should still
+	// lose the score on a hard reasoning prompt to something like
+	// claude-opus-4.7 when that's actually available.
+	{
+		ID:             "gpt-oss-120b",
+		InputUSDPer1M:  0.35,
+		OutputUSDPer1M: 0.75,
+
+		LatencySec:  0.25, // Cerebras wafer-scale inference — the fastest tier in this catalog
+		FailureRate: 0.03,
+
+		// A 120B open-weight reasoning-tuned model — meaningfully more
+		// capable than the small/fast entries below, but still not
+		// frontier-tier.
+		Reasoning:    0.85,
+		Coding:       0.80,
+		Math:         0.85,
+		Multilingual: 0.75,
+
+		ContextWindow: 128_000,
+	},
+	{
+		ID:             "llama-3.1-8b-instant",
+		InputUSDPer1M:  0.05,
+		OutputUSDPer1M: 0.08,
+
+		LatencySec:  0.15, // Groq — small model on fast inference hardware
+		FailureRate: 0.035,
+
+		// An 8B model: genuinely small, priced and scored accordingly —
+		// good for short/simple prompts, not for anything demanding.
+		Reasoning:    0.55,
+		Coding:       0.50,
+		Math:         0.55,
+		Multilingual: 0.55,
+
+		ContextWindow: 128_000,
+	},
+	{
+		ID:             "mistral-small-latest",
+		InputUSDPer1M:  0.15,
+		OutputUSDPer1M: 0.60,
+
+		LatencySec:  0.90,
+		FailureRate: 0.03,
+
+		Reasoning:    0.75,
+		Coding:       0.72,
+		Math:         0.74,
+		Multilingual: 0.78,
+
+		ContextWindow: 128_000,
+	},
 }
 
 // knownContextWindows covers widely-used models not in the routing catalog.
