@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
@@ -49,7 +50,8 @@ func (a *Adapter) setHeaders(r *http.Request) {
 
 // Chat sends req to the Anthropic Messages API and returns a normalised response.
 func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
-	body, err := json.Marshal(toWireRequest(req))
+	historyLen, _ := cache.HistoryLenFromContext(ctx)
+	body, err := json.Marshal(toWireRequest(req, historyLen))
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal request: %w", err)
 	}
@@ -90,7 +92,8 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 // Stream sends req with stream=true using Anthropic's multi-event SSE format.
 // Sequence: message_start → content_block_delta* → message_delta → message_stop.
 func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
-	wr := toWireRequest(req).withStream()
+	historyLen, _ := cache.HistoryLenFromContext(ctx)
+	wr := toWireRequest(req, historyLen).withStream()
 
 	body, err := json.Marshal(wr)
 	if err != nil {
