@@ -62,7 +62,7 @@ New behaviour is added as plugins that consume `CallEvent` from the bus (async, 
 | Streaming (SSE) | `internal/ingress/stream.go` | Full server-sent events |
 | Auth — API keys, JWT, mTLS | `internal/ingress/auth.go` | All three ingress auth modes |
 | Rate limiting (per-identity, sliding window) | `internal/ingress/ratelimit.go` | Returns 429 + Retry-After |
-| Circuit breaker | `internal/domain/circuitbreaker/` | Per-model, shared state |
+| Circuit breaker | `internal/domain/circuitbreaker/` | Per-model; optional cross-instance state sharing via `StateStore` |
 | Routing + fallback chains | `internal/domain/routing/` | Router, scorer, fallback, filter |
 | Exact-match response cache | `internal/domain/cache/cache.go` | SHA-256 keyed |
 | Semantic response cache | `internal/domain/cache/semantic*.go` | Two-layer; file-journal persistence |

@@ -111,3 +111,26 @@ func (b *Breaker) CurrentState() State {
 	defer b.mu.Unlock()
 	return b.state
 }
+
+// setState seeds the breaker's state from an external source (a shared
+// StateStore — see registry.go) rather than a local Allow/RecordSuccess/
+// RecordFailure transition. Only used when creating a Breaker that a
+// StateStore says another ixr instance already tripped, so a freshly
+// created local Breaker doesn't start Closed and blindly send traffic to a
+// model every other replica has already learned is unhealthy.
+//
+// openedAt is set to now rather than preserved from whatever instance
+// originally tripped it — this instance doesn't know the original trip
+// time, only that it's currently Open. The tradeoff: a newly-seeded
+// replica always waits the full HalfOpenAfter window before probing, even
+// if the model already recovered elsewhere moments ago. Errs toward extra
+// caution rather than under-caution, which is the right side to be wrong
+// on for a circuit breaker.
+func (b *Breaker) setState(s State) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.state = s
+	if s == StateOpen {
+		b.openedAt = time.Now()
+	}
+}

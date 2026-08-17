@@ -46,6 +46,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/adapters/providers/openrouter"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/sambanova"
 	"github.com/YashVishwas/ixr/internal/adapters/providers/zhipu"
+	"github.com/YashVishwas/ixr/internal/adapters/store/cbstate"
 	modelperf "github.com/YashVishwas/ixr/internal/adapters/store/modelperf"
 	policystore "github.com/YashVishwas/ixr/internal/adapters/store/policystore"
 	"github.com/YashVishwas/ixr/internal/adapters/store/retrievalstore"
@@ -126,6 +127,21 @@ func Start(opts ...Option) error {
 
 	// --- Circuit breaker ---
 	cbRegistry := circuitbreaker.NewRegistry(circuitbreaker.DefaultPolicy)
+	// IXR_CBSTATE_REDIS_ADDR opts into sharing circuit breaker state
+	// across ixr replicas — a model one replica trips is immediately
+	// excluded on every other replica too, instead of each one having to
+	// independently rediscover the degradation through its own failed
+	// requests. Unset means exactly the pre-feature in-memory, single-
+	// instance behavior; never mandatory.
+	if cbRedisAddr := os.Getenv("IXR_CBSTATE_REDIS_ADDR"); cbRedisAddr != "" {
+		cbRedisClient := redis.NewClient(&redis.Options{
+			Addr:     cbRedisAddr,
+			Password: os.Getenv("IXR_CBSTATE_REDIS_PASSWORD"),
+			DB:       envInt("IXR_CBSTATE_REDIS_DB", 0),
+		})
+		cbTTL := time.Duration(envInt("IXR_CBSTATE_TTL_SEC", 300)) * time.Second
+		cbRegistry.WithStateStore(cbstate.New(cbRedisClient, cbTTL))
+	}
 
 	// --- Scoring engine ---
 	scoringEngine := scoring.NewEngine(perfStore, policyMem, routing.Catalog())
