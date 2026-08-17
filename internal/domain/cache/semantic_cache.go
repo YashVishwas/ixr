@@ -71,6 +71,17 @@ type SemanticCache struct {
 	backend   SemanticBackend
 	embedder  Embedder
 	threshold float32
+
+	// Optional quality tier: a second, independent embedder+backend pair for
+	// higher-quality (e.g. real provider-backed) embeddings. Kept fully
+	// separate from backend/embedder above rather than sharing storage,
+	// because comparing vectors from two different embedders via
+	// cosineSimilarity silently scores 0 on dimension mismatch — sharing one
+	// backend across two embedding spaces would make every quality-tier
+	// entry permanently unmatchable. See WithQualityTier.
+	qualityEmbedder Embedder
+	qualityBackend  SemanticBackend
+	qualityTimeout  time.Duration
 }
 
 // NewSemanticCache creates a two-layer cache.
@@ -83,6 +94,31 @@ func NewSemanticCache(exact *ExactCache, backend SemanticBackend, embedder Embed
 		embedder:  embedder,
 		threshold: threshold,
 	}
+}
+
+// WithQualityTier adds an optional second embedder+backend pair used
+// alongside (not instead of) the primary fast embedder. It exists to let a
+// slow, real embedder (e.g. an OpenAI-backed ProviderEmbedder) catch
+// paraphrase-level matches the fast WordVectorizer approximation misses,
+// without slowing down or corrupting the existing fast path:
+//
+//   - Store always writes into the fast tier synchronously (unchanged), then
+//     — if a quality tier is configured — embeds and writes into the quality
+//     tier asynchronously, off the request path entirely (fire-and-forget,
+//     detached from the caller's context so a client disconnect can't cancel
+//     it).
+//   - Lookup only consults the quality tier when the fast tier misses, and
+//     only for up to lookupTimeout — bounding the extra latency a cache miss
+//     can incur to something the operator explicitly opted into, rather than
+//     silently blowing the fast path's 5ms budget.
+//
+// backend must be dedicated to this embedder — see the qualityEmbedder field
+// doc for why sharing a backend across two embedding spaces is unsafe.
+func (s *SemanticCache) WithQualityTier(embedder Embedder, backend SemanticBackend, lookupTimeout time.Duration) *SemanticCache {
+	s.qualityEmbedder = embedder
+	s.qualityBackend = backend
+	s.qualityTimeout = lookupTimeout
+	return s
 }
 
 func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, CacheHit, bool) {
@@ -107,7 +143,28 @@ func (s *SemanticCache) Lookup(ctx context.Context, req *schema.RequestEnvelope)
 		return nil, CacheHitNone, false
 	}
 
-	resp, ok := s.backend.Find(ctx, vec, s.threshold)
+	if resp, ok := s.backend.Find(ctx, vec, s.threshold); ok {
+		return resp, CacheHitSemantic, true
+	}
+
+	if s.qualityEmbedder == nil || s.qualityBackend == nil {
+		return nil, CacheHitNone, false
+	}
+
+	// Quality-tier fallback: only reached on a fast-path miss, and bounded by
+	// an operator-chosen timeout rather than the fast path's fixed 5ms — this
+	// is extra latency the operator explicitly opted into by configuring a
+	// quality tier at all, not something imposed on every lookup.
+	qCtx, cancel := context.WithTimeout(ctx, s.qualityTimeout)
+	defer cancel()
+
+	qVec, err := s.qualityEmbedder.Embed(qCtx, text)
+	if err != nil {
+		slog.Debug("semantic cache quality-tier embed failed on lookup", "err", err)
+		return nil, CacheHitNone, false
+	}
+
+	resp, ok := s.qualityBackend.Find(ctx, qVec, s.threshold)
 	if !ok {
 		return nil, CacheHitNone, false
 	}
@@ -126,10 +183,29 @@ func (s *SemanticCache) Store(ctx context.Context, req *schema.RequestEnvelope, 
 	vec, err := s.embedder.Embed(ctx, text)
 	if err != nil {
 		slog.Debug("semantic cache embed failed on store", "err", err)
+	} else {
+		s.backend.Store(ctx, vec, resp, ttl)
+	}
+
+	if s.qualityEmbedder == nil || s.qualityBackend == nil {
 		return
 	}
 
-	s.backend.Store(ctx, vec, resp, ttl)
+	// Detached from ctx: this runs after Store returns, potentially after the
+	// triggering request's context has already been cancelled (client
+	// disconnect, request completion). Using context.Background() keeps the
+	// quality embed from being cancelled by an event unrelated to it.
+	qualityEmbedder, qualityBackend := s.qualityEmbedder, s.qualityBackend
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		vec, err := qualityEmbedder.Embed(bgCtx, text)
+		if err != nil {
+			slog.Debug("semantic cache quality-tier embed failed on store", "err", err)
+			return
+		}
+		qualityBackend.Store(bgCtx, vec, resp, ttl)
+	}()
 }
 
 // requestText extracts user and system message content for embedding,
