@@ -155,3 +155,51 @@ func TestFromGenWireResponse_FunctionCallOnly(t *testing.T) {
 		t.Errorf("finish_reason: got %q, want tool_calls (overridden despite raw STOP)", got.Choices[0].FinishReason)
 	}
 }
+
+// TestFromGenWireResponse_CachedContentTokens confirms Gemini's context-
+// caching usage field (populated for both implicit and explicit caching)
+// reaches schema.Usage.CacheReadInputTokens, which is what
+// internal/domain/cost prices at a discount.
+func TestFromGenWireResponse_CachedContentTokens(t *testing.T) {
+	wr := &genWireResponse{
+		Candidates: []genCandidate{{
+			Content:      genContent{Role: "model", Parts: []genPart{{Text: "hi"}}},
+			FinishReason: "STOP",
+		}},
+		UsageMetadata: genUsage{
+			PromptTokenCount:        1000,
+			CandidatesTokenCount:    50,
+			TotalTokenCount:         1050,
+			CachedContentTokenCount: 700,
+		},
+	}
+
+	got, err := fromGenWireResponse("gemini-3.1-pro", wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Usage.CacheReadInputTokens != 700 {
+		t.Errorf("CacheReadInputTokens: got %d, want 700", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestFromGenWireResponse_NoCachedContent_ZeroCacheReadTokens confirms a
+// response with no context caching involved doesn't pick up a stray
+// nonzero value.
+func TestFromGenWireResponse_NoCachedContent_ZeroCacheReadTokens(t *testing.T) {
+	wr := &genWireResponse{
+		Candidates: []genCandidate{{
+			Content:      genContent{Role: "model", Parts: []genPart{{Text: "hi"}}},
+			FinishReason: "STOP",
+		}},
+		UsageMetadata: genUsage{PromptTokenCount: 1000, CandidatesTokenCount: 50, TotalTokenCount: 1050},
+	}
+
+	got, err := fromGenWireResponse("gemini-3.1-pro", wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Usage.CacheReadInputTokens != 0 {
+		t.Errorf("CacheReadInputTokens: got %d, want 0", got.Usage.CacheReadInputTokens)
+	}
+}

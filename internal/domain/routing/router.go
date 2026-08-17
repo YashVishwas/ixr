@@ -51,6 +51,25 @@ type ModelCard struct {
 	InputUSDPer1M  float64
 	OutputUSDPer1M float64
 
+	// CachedInputUSDPer1M is the discounted rate for prompt-cache-hit
+	// input tokens (Anthropic cache_control reads, Gemini context-cache
+	// hits, DeepSeek KV-cache hits — see internal/domain/cost.ForUsage,
+	// which is where this actually gets applied). 0 means this model
+	// either doesn't support prompt caching or the provider adapter
+	// doesn't report cache-hit counts yet, so cache-read tokens (if any
+	// were somehow reported) price at the standard InputUSDPer1M rate —
+	// no discount assumed unless a real one is configured.
+	CachedInputUSDPer1M float64
+	// CacheWriteUSDPer1M is the rate for tokens that populate a new cache
+	// entry. Anthropic charges a premium for this (writing costs more
+	// than a plain input token, since the model has to actually process
+	// and store the prefix). Providers with fully automatic, no-extra-
+	// charge caching (DeepSeek, Gemini implicit caching) leave this 0,
+	// which falls back to the standard InputUSDPer1M rate — correct,
+	// since a cache miss there costs exactly what a normal input token
+	// costs, nothing more.
+	CacheWriteUSDPer1M float64
+
 	LatencySec  float64
 	FailureRate float64
 
@@ -80,6 +99,12 @@ var catalog = []ModelCard{
 		ID:             "claude-opus-4.7",
 		InputUSDPer1M:  5,
 		OutputUSDPer1M: 25,
+		// Anthropic's cache_control pricing is a fixed ratio of the
+		// input rate across their models: writes cost 1.25x (the model
+		// processes and stores the prefix), reads cost 0.1x (the whole
+		// point of caching).
+		CachedInputUSDPer1M: 5 * 0.1,
+		CacheWriteUSDPer1M:  5 * 1.25,
 
 		LatencySec:  1.8,
 		FailureRate: 0.02,
@@ -96,6 +121,9 @@ var catalog = []ModelCard{
 
 		InputUSDPer1M:  3,
 		OutputUSDPer1M: 15,
+		// See claude-opus-4.7's comment — same fixed Anthropic ratio.
+		CachedInputUSDPer1M: 3 * 0.1,
+		CacheWriteUSDPer1M:  3 * 1.25,
 
 		LatencySec:  1.1,
 		FailureRate: 0.02,
@@ -141,6 +169,13 @@ var catalog = []ModelCard{
 		ID:             "gemini-3.1-pro",
 		InputUSDPer1M:  2,
 		OutputUSDPer1M: 12,
+		// Gemini's context caching (implicit, automatic on 2.x+ models —
+		// no request-side code needed, see googleai/translate.go's usage
+		// parsing) bills cache-hit tokens at roughly a quarter of the
+		// standard input rate. No write premium: populating the cache is
+		// a free byproduct of normal processing, so CacheWriteUSDPer1M
+		// stays 0 (falls back to the standard rate).
+		CachedInputUSDPer1M: 2 * 0.25,
 
 		LatencySec:  30.3,
 		FailureRate: 0.022,
@@ -156,6 +191,11 @@ var catalog = []ModelCard{
 		ID:             "deepseek-v3-0324",
 		InputUSDPer1M:  0.27,
 		OutputUSDPer1M: 1.10,
+		// DeepSeek's disk-backed KV cache (automatic, no request-side
+		// code needed — see deepseek adapter's usage parsing) bills
+		// cache-hit tokens at roughly a tenth of the standard input
+		// rate. No write premium, same reasoning as Gemini above.
+		CachedInputUSDPer1M: 0.27 * 0.1,
 
 		LatencySec:  4,
 		FailureRate: 0.035,

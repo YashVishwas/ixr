@@ -69,14 +69,21 @@ New behaviour is added as plugins that consume `CallEvent` from the bus (async, 
 | Session continuity | `internal/domain/session/`, `internal/ingress/session_middleware.go` | Cross-request history; delta journal; `X-IXR-Session-ID` header |
 | Multi-tenancy + per-tenant credentials | `internal/domain/tenant/` | Per-tenant rate limits and provider keys |
 | Intent parsing | `internal/domain/intent/` | Taxonomy + parser + complexity scoring |
-| Bandit scoring engine | `internal/domain/scoring/` | Epsilon-greedy/UCB, reward, regret tracking |
+| Bandit scoring engine | `internal/domain/scoring/` | Epsilon-greedy/UCB, reward, regret tracking, progressive cooldown |
+| Bandit-driven primary auto-routing | `internal/domain/routing/`, `plugins/banditreward/` | Gap 12 — opt-in via `IXR_AUTO_BANDIT` |
 | Shadow routing | `internal/domain/scoring/shadow.go` | Parallel shadow requests, offline comparison |
+| Model chaining (sequential + fusion) | `internal/domain/chain/`, `internal/ingress/chain.go` | Gap 11 — `chains:` config, draft-then-refine, panel-plus-judge |
+| Budget enforcement (hierarchical) | `plugins/budget/` | Gaps 3 + 8 — org → team → user, reservation-based pre-call estimation |
+| User memory & cross-session context | `internal/domain/memory/`, `plugins/memory/` | Gap 9 — rule-based extraction; LLM extractor built but not wired |
+| Reasoning-model token budget adjustment | `internal/domain/reasoning/` | Gap 6 — o-series, Gemini thinking, DeepSeek R1 |
+| OTEL GenAI span emission | `plugins/telemetry/otel.go` | Gap 7 — real semconv package, opt-in via `IXR_OTLP_ENDPOINT` |
+| Schema for non-Go consumers | `schema/` | Gap 4 — `.proto` + JSON Schema, v1, hand-synced |
 | Signed releases + SBOM | `.github/workflows/release.yml` | cosign keyless signing + syft SPDX |
 | Vulnerability scanning CI | `.github/workflows/govulncheck.yml` | govulncheck on every push |
 | 16 provider adapters | `internal/adapters/providers/` | OpenAI, Anthropic, Bedrock, Mistral, Ollama, DeepSeek, LlamaCpp, Llama, Cerebras, GitHub Models, Google AI, OpenRouter, SambaNova, ZhiPu, OpenAI-compat, Local |
 | Typed event bus | `pkg/bus/` | In-memory channel; external adapters planned |
 | Schema — typed CallEvent | `pkg/schema/` | event, cost, identity, telemetry, tool, audio, images, embeddings |
-| Plugins | `plugins/` | audit-log, telemetry, token-usage |
+| Plugins | `plugins/` | audit-log, banditreward, budget, memory, telemetry |
 | One-line embed + single binary + Docker | `pkg/ixr/`, `cmd/ixr/`, `Dockerfile` | All three insertion paths |
 
 ---
@@ -164,6 +171,8 @@ func (b *BudgetPlugin) Intercept(ctx context.Context, req *schema.RequestEnvelop
 
 Spend state is in-memory. Persistence follows the same file-journal pattern as the semantic cache — appending spend records to disk, replaying on startup — so budgets survive restarts without requiring a database. Limits are loaded from config or the policy store.
 
+**Status: implemented** (`plugins/budget/`), and more robust than this sketch in one respect the sketch didn't anticipate: `Intercept` doesn't just check accumulated spend, it also reserves each scope's running average cost per call *before* the request goes out, then reconciles the reservation to the real cost in `OnEvent`. Without that, a burst of concurrent requests arriving while spend is still under the ceiling could all pass the pre-call check before any of their (async, post-call) `OnEvent` accumulates real spend — overspending the ceiling by up to the burst size, since the check and the accumulation are separated by a full LLM round trip. File-journal persistence (`budget.jsonl`, replayed on startup) matches the sketch. See Gap 8 below — this same plugin also implements the hierarchical (org → team → user) extension, not a separate one.
+
 ---
 
 ### Gap 4 — Schema Definition for Non-Go Consumers
@@ -179,6 +188,8 @@ Spend state is in-memory. Persistence follows the same file-journal pattern as t
 The proto is versioned at `v1`. Breaking changes to `pkg/schema` require a proto version bump. This is the same stability contract that applies to the Go `pkg/` boundary.
 
 No runtime dependency on proto — the `.proto` file and generated stubs are publish artefacts, not core dependencies. The Go types remain plain structs with JSON tags.
+
+**Status: implemented, with one deviation from the sketch.** `schema/ixr.proto` and `schema/ixr.schema.json` exist and are versioned v1 (`schema/README.md` documents both plus the key types table). The deviation: there's no `make gen-schema` target and no `protoc` codegen step — the artifacts are hand-maintained, not generated, kept in sync manually with `pkg/schema`'s Go structs (`schema/README.md` says so explicitly: "If you find a discrepancy, the Go types win"). That's a real staleness risk, same category as the routing catalog's pricing data — worth automating if the schema starts drifting in practice, but not a functional gap for a consumer reading the contract today.
 
 ---
 
@@ -234,6 +245,8 @@ Before forwarding the request, the adapter checks if the model is in the map. If
 
 This is opt-in per model family and configurable via the provider config block. The ratio values are conservative defaults that operators can tune.
 
+**Status: implemented, differently from the sketch.** A shared `internal/domain/reasoning` package (not a per-adapter map) covers OpenAI's o-series, Gemini thinking variants, and DeepSeek R1 — one place to maintain the overhead table instead of duplicating it across every reasoning-capable adapter. `AdjustTokenBudget` is called at every `routing.Execute`/`ExecuteStream`/direct-provider call site in `internal/ingress/chat.go` and `chain.go`, including the shadow-routing path — not opt-in per the sketch, always applied for a request naming a known reasoning model (unrecognized models are a no-op, so this can't affect non-reasoning traffic). Not yet tunable: a comment in `budget.go` says the ratios can be overridden via `IXR_REASONING_OVERHEAD_<MODEL>` env vars, but no code actually reads one — that's aspirational, not implemented, and worth either building or removing the comment.
+
 ---
 
 ### Gap 7 — OTEL-Native Span Emission
@@ -265,6 +278,8 @@ func (p *Plugin) emitSpan(ctx context.Context, ev *schema.CallEvent) {
 
 Enabled when `IXR_OTLP_ENDPOINT` is set (already wired in `ixr.go`). The plugin checks whether a tracer is active and emits spans only if it is. No OTEL dependency is added to the core — it is already a dependency of `internal/observability/`.
 
+**Status: implemented**, using the real `go.opentelemetry.io/otel/semconv` package rather than hand-typed attribute string constants — less drift risk as the GenAI semantic conventions evolve. One improvement over the sketch: `OTELSink.Write` starts the span at `rec.Timestamp` (the actual provider call time) rather than whenever the async plugin gets around to processing the event, so trace timing reflects reality even under bus backlog. No-op with zero overhead when no OTLP endpoint is configured, matching the sketch's intent.
+
 ---
 
 ### Gap 8 — Hierarchical Budget Controls
@@ -293,6 +308,8 @@ func (b *BudgetPlugin) Intercept(ctx context.Context, req *schema.RequestEnvelop
 ```
 
 Limits are configurable per scope level. Spend accumulated by `OnEvent` is keyed by scope so org-level spend is the sum of all team-level spend within that org. No new data model is needed — the tenant hierarchy already exists.
+
+**Status: implemented** — the same `plugins/budget/` plugin as Gap 3, not a separate extension: `Intercept` walks `user → team → tenant` scope keys (`"tenantID:teamID:userID"`, `"tenantID:teamID"`, `"tenantID"`) and blocks on the first exceeded scope, exactly matching the sketch's intent. `OnEvent` increments spend at every scope simultaneously (a $0.05 call by `acme:eng:alice` increments `acme:eng:alice`, `acme:eng`, and `acme` in one pass), so org-level spend is always the live sum of everything beneath it rather than a separately-maintained rollup. See Gap 3's status note for the one thing beyond this sketch: reservation-based pre-call estimation to close the burst-overspend race window.
 
 ---
 
@@ -402,6 +419,8 @@ SessionMiddleware
 | `IXR_MEMORY_TOP_K` | `5` | Max memories injected per new session |
 | `IXR_MEMORY_EXTRACTOR` | `rule` | `rule` or `llm` |
 
+**Status: implemented, with one config option that's currently a no-op.** `internal/domain/memory/`, `plugins/memory/`, delta-journal persistence, and the `TurnEvent`-triggered async extraction all match this section as written. The gap: `IXR_MEMORY_EXTRACTOR=llm` is documented above and `memory.LLMExtractor` is fully implemented (`internal/domain/memory/extractor.go`), but `pkg/ixr/ixr.go` never actually wires it in — it always constructs `memory.RuleExtractor{}` regardless of the env var, with an in-code comment noting `LLMExtractor` needs a provider reference to call out to and that wiring is deferred ("future"). An operator setting `IXR_MEMORY_EXTRACTOR=llm` today gets silent rule-only extraction, not an error — worth either wiring it up or removing the option from the table until it's real, since right now the documented behavior and the actual behavior disagree.
+
 ---
 
 ### Gap 10 — Multimodal Input (Vision)
@@ -484,6 +503,8 @@ Execution: for step *i*, build a request whose messages are the caller's origina
 
 Config loading: `internal/adapters/config/schema.go` gains a `Chains map[string]ChainConfig` section; `pkg/ixr/ixr.go` builds the `chain.Registry` alongside the other registries at startup, same wiring shape as everything else there.
 
+**Status: implemented** (`internal/domain/chain/`, `internal/ingress/chain.go`) as described above, plus the fusion/parallel-panel-plus-judge extension covered under Gap 13's "Fusion" note. The one known narrower gap left is documented in the next paragraph, not a separate open item.
+
 **Chain steps and Gap 5 (context-window escalation) — a known, narrower gap after the live-wiring fix below.** Each step routes via `internal/ingress/chain.go`'s `runChainStep`, which still builds a bare `routing.RoutingDecision{Model: model}` with no `FallbackChain`, so a context-length error mid-chain has nothing to escalate to and the step fails like any other error, aborting the chain. This note originally justified that as "not chain-specific — an explicit-model request outside chains has exactly the same limitation," which was true when it was written but is now stale: the live-wiring fix documented above gives every explicit catalog-model request (outside chains) a real `FallbackChain` via `routing.FallbackChainFor`. Chain steps were not updated to match, so they're now a genuinely narrower case than direct requests, not an equivalent one. `TestChatHandler_ChainStepContextOverflowAbortsCleanly` still holds — the failure is clean (502, well-formed JSON body, no hang or panic) — but "fix" now means giving `runChainStep` the same `FallbackChainFor` treatment `chat.go` has, which is a small, well-scoped follow-up rather than the "design per-step fallback chains from scratch" this note originally described.
 
 ---
@@ -502,6 +523,8 @@ Minimal-risk integration, given `scoring.Engine.Decide` is relied on by existing
 - Reward recording reuses the existing formula: `internal/domain/scoring/shadow.go`'s orchestrator already computes `success*0.7 + (latency<2s)*0.3` and calls into the bandit for shadow routing; a new `plugins/banditreward` plugin applies the identical formula to real primary-routed `CallEvent`s. A new marker on `CallEvent` (`AutoRouted bool`, set in `chat.go`'s `model:"auto"` branch, both streaming and non-streaming) tells the plugin which events came from `model:"auto"` versus an explicit model name — explicit requests and shadow events are both ignored, since neither opted into the bandit's exploration.
 
 **Status: implemented.** Opt-in via `IXR_AUTO_BANDIT=true`, default off — matching the RFC's core constraint that the unconfigured state must be equivalent to the pre-feature state; the existing deterministic auto-routing tests pass unchanged. Shares the same `EpsilonGreedy` instance already constructed for shadow routing, so exploration and reward from both paths reinforce one set of arm statistics. Unit-tested with a stub bandit forced to a specific pick, proving `Decide` actually defers control rather than silently ignoring it; live-verified that `AutoRouted` flows correctly into the audit trail and the plugin pipeline doesn't error under load.
+
+**Caller-feedback quality signal — implemented.** `plugins/banditreward`'s reward is entirely success/latency-derived — it has no notion of whether an answer was actually *good*, only whether the call completed quickly. `POST /v1/feedback` (`internal/ingress/feedback_handler.go`) lets a caller rate a response `"positive"`/`"negative"` by the same `id` their chat completions response already carried, which resolves back to the model that handled it via `internal/domain/feedback.Store` (populated from the event bus by `plugins/feedback`, TTL-bounded, in-memory, single-instance — same scope as `internal/domain/retrieval.Store` before Gap 6's durable-backend work) and calls `Bandit.Update` a second time with `1.0`/`0.0`, on the same [0, 1] scale and the same arm statistics the automatic signal already trains. Only auto-routed calls actually move the bandit — a caller who named a model explicitly didn't opt into exploration, the same rule `banditreward` already applies — but feedback on an explicit request is still accepted (200) rather than rejected, since the caller did nothing wrong. Gated behind `IXR_AUTO_BANDIT=true` (meaningless without it) with its own `IXR_FEEDBACK_STORE_SIZE`/`IXR_FEEDBACK_TTL_SEC` knobs. Unit-tested end to end: positive/negative rating → correct reward value on the correct arm, non-auto-routed calls accepted but bandit untouched, unknown/expired call IDs 404, malformed input 400.
 
 ---
 
@@ -524,6 +547,8 @@ Investigating *why* surfaced two distinct findings, not one:
 **Fusion / parallel-panel-plus-judge — implemented.** OmniRoute's other named routing strategy this RFC didn't yet cover: `chain.Chain` gained a `Strategy` field (`internal/domain/chain/chain.go`), `"sequential"` (the existing Gap 11 behavior, now the default) or `"fusion"` — Models run in parallel against the caller's original messages, then their combined answers route to `Judge` for synthesis (`internal/ingress/chain.go`'s `handleFusionChain`). A single panel member failing doesn't abort the request, only an all-panel failure does — the resilience a panel is supposed to buy you, and a deliberate difference from sequential's abort-on-any-failure semantics. Configured via `ixr.yaml`'s existing `chains:` block (`strategy: fusion`, `judge: <model>`); see `panel-judge` in `demo-ixr.yaml`. Live-verified end-to-end against real Anthropic/Groq/Mistral traffic, both streaming and non-streaming.
 
 **Chain streaming bug fix.** Found while stress-testing this gap: `chat.go` dispatched `chains:` requests to `handleChain` before ever checking `req.Stream`, so a `stream:true` request against any chain silently got a plain JSON body back instead of SSE — confirmed live before the fix. The terminal call in both strategies (last sequential step, or the fusion judge) now honours `req.Stream`; earlier/panel calls stay non-streaming since they need each other's full text to build the next prompt or the judge's input.
+
+**Routing-quality eval harness — implemented.** Everything above (bandit exploration, cooldown, fusion, and any future caller-feedback quality signal) is a mechanism for improving routing — none of it, on its own, proves routing is *actually* delivering good-cheap answers over time rather than just optimizing the proxy signals available at request time (`FinishReason`, cost estimates). `cmd/ixr-eval` (`internal/eval`) closes that gap: a golden question set (`eval/golden.yaml`) scored across any set of models — including `"auto"`, so auto-routing itself can be measured, not just its component models — via real HTTP calls to a running ixr instance (the actual request path: routing, plugins, cost accounting all included, not a shortcut through internal Go APIs). Scoring is deliberately simple (case-insensitive substring `must_contain`/`must_not_contain` checks, not an LLM judge) — cheap and deterministic enough to run repeatedly and track over time, consistent with the RFC's "no data leaves the process without explicit operator configuration" constraint applying here too. Reports per-model pass rate, average latency, and average/total cost (`make eval MODELS=gpt-4o,claude-sonnet-4-6,auto`). Unit-tested (`internal/eval/eval_test.go`): YAML parsing, substring scoring in both directions, a `ChatFunc`-error mid-run producing a failed result rather than aborting the rest of the eval, and summary aggregation (pass rate counts errors as failures, average cost excludes them since there's nothing priced to average in).
 
 ---
 
@@ -685,7 +710,7 @@ These are real problems in the ecosystem. ixr will not absorb them.
 
 8. **Memory staleness and correction.** Users change — someone who said "I work at Acme" last year may work somewhere else now. There is no mechanism to update or invalidate an existing memory entry when a newer fact contradicts it. The `LLMExtractor` could detect contradictions and overwrite; the `RuleExtractor` cannot. This needs a resolution before memory is considered reliable.
 
-9. **Streaming session capture.** Streaming responses currently receive history injection but the response is not captured back into the session store (v1 constraint). A v2 SSE assembler that reconstructs the assistant turn from chunks would close this gap without buffering the stream for the client.
+9. ~~**Streaming session capture.**~~ **Resolved.** `sseCaptureWriter` (`internal/ingress/session_stream_capture.go`) wraps the `http.ResponseWriter` `SessionMiddleware` passes to `next` — it tees every `Write` straight through to the real client (so bytes reach the client the instant they're written, no added latency) while also buffering them, and forwards `Flush()` to the underlying writer's `http.Flusher` (`ChatHandler.handleStream` type-asserts this before it will stream at all, so a wrapper that didn't forward it would break streaming entirely, not just silently skip capture). After the stream finishes, `parseSSEAssistantTurn` decodes the buffered bytes using the same `sseChunkEnvelope`/`sseDelta` types `stream.go` used to encode them (same package — a decode of exactly what was sent, not a reimplementation of the wire format), concatenating `Delta.Content` across chunks and keeping the last non-empty `Delta.ToolCalls`. An error response written before streaming begins (`writeError`'s plain JSON body) or a stream that fails before producing any chunk correctly yields no content to append — `parseSSEAssistantTurn` returns `ok=false` and `SessionMiddleware` skips the `Append` call, same as the non-streaming path's existing `len(rec.body) > 0` check. Unit-tested at both layers (the parser directly, and `sseCaptureWriter`'s `Flusher` forwarding) plus one end-to-end test with real `SessionMiddleware` → `ChatHandler` wiring proving a streamed reply is both delivered to the client unmodified and appended to session history for the next turn.
 
 10. ~~**Semantic cache false hits when session history is large.**~~ **Resolved** — option 2 below is implemented. Note this also required first merging the `semantic-cache` branch (Gap 2) into `main`/the integration branch: despite the RFC's status table listing it as implemented, that branch had never actually been merged anywhere reachable from the product's mainline (`git branch --all --contains semantic-cache` showed only the isolated branch and stale test branches) — it was implemented in isolation, then this exact false-hit bug was found in that isolated `test/all-features` integration testing and the branch sat unmerged.
 
@@ -709,6 +734,5 @@ These are real problems in the ecosystem. ixr will not absorb them.
 - **`model: "auto"` as default** — when no model is specified, the scoring engine picks. Currently requires explicit opt-in.
 - **Quality score in reward function** — the bandit scoring engine has a placeholder `δ * quality_score` term; wiring it requires a lightweight output quality signal (e.g. response length, format adherence, downstream error rate).
 - **User memory & cross-session context (Gap 9)** — `UserMemoryStore` + `MemoryExtractor` + injection via `SessionMiddleware`. `RuleExtractor` first, `LLMExtractor` as opt-in upgrade.
-- **Streaming session capture** — SSE assembler to reconstruct assistant turn from chunks and append to session store without buffering for the client.
 - **Memory management API** — `GET /v1/memory` and `DELETE /v1/memory/:id` endpoints so users can inspect and correct their stored memories.
 - **CNCF Sandbox submission** — the long-term governance target once the project reaches production stability across multiple adopters.

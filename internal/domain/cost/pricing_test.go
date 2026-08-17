@@ -102,3 +102,63 @@ func TestForUsage_CacheCountsExceedPromptTokens_DefensiveFallback(t *testing.T) 
 		t.Fatalf("expected non-negative cost even with an inconsistent cache count, got %.4f", got.InputUSD)
 	}
 }
+
+// TestForUsage_DeepSeekCacheHitDiscounted proves prompt-cache pricing isn't
+// Anthropic-only: DeepSeek's disk-backed KV cache reports hits into the
+// same CacheReadInputTokens field, and deepseek-v3-0324's catalog entry
+// configures its own (much steeper, no-write-premium) discount ratio.
+func TestForUsage_DeepSeekCacheHitDiscounted(t *testing.T) {
+	allRegular := ForUsage("deepseek-v3-0324", schema.Usage{PromptTokens: 1_000_000})
+	allCached := ForUsage("deepseek-v3-0324", schema.Usage{PromptTokens: 1_000_000, CacheReadInputTokens: 1_000_000})
+
+	if allCached.InputUSD >= allRegular.InputUSD {
+		t.Fatalf("expected a fully cache-hit DeepSeek call to cost less than regular input: cached=%.4f regular=%.4f", allCached.InputUSD, allRegular.InputUSD)
+	}
+	// deepseek-v3-0324 input rate is $0.27/1M, cache-hit rate is 0.1x that.
+	want := 0.27 * 0.1
+	if allCached.InputUSD < want-0.0001 || allCached.InputUSD > want+0.0001 {
+		t.Fatalf("DeepSeek cache-hit pricing: got %.4f, want %.4f", allCached.InputUSD, want)
+	}
+}
+
+// TestForUsage_DeepSeekCacheMiss_NoWritePremium confirms DeepSeek's cache
+// misses (CacheCreationInputTokens) price at the plain input rate, not a
+// premium — unlike Anthropic, populating the cache costs nothing extra.
+func TestForUsage_DeepSeekCacheMiss_NoWritePremium(t *testing.T) {
+	allRegular := ForUsage("deepseek-v3-0324", schema.Usage{PromptTokens: 1_000_000})
+	allCreation := ForUsage("deepseek-v3-0324", schema.Usage{PromptTokens: 1_000_000, CacheCreationInputTokens: 1_000_000})
+
+	if allCreation.InputUSD != allRegular.InputUSD {
+		t.Fatalf("expected DeepSeek cache-creation tokens to price the same as regular input (no write premium): creation=%.4f regular=%.4f", allCreation.InputUSD, allRegular.InputUSD)
+	}
+}
+
+// TestForUsage_GeminiCacheHitDiscounted mirrors the DeepSeek case for
+// Gemini's implicit context caching.
+func TestForUsage_GeminiCacheHitDiscounted(t *testing.T) {
+	allRegular := ForUsage("gemini-3.1-pro", schema.Usage{PromptTokens: 1_000_000})
+	allCached := ForUsage("gemini-3.1-pro", schema.Usage{PromptTokens: 1_000_000, CacheReadInputTokens: 1_000_000})
+
+	if allCached.InputUSD >= allRegular.InputUSD {
+		t.Fatalf("expected a fully cache-hit Gemini call to cost less than regular input: cached=%.4f regular=%.4f", allCached.InputUSD, allRegular.InputUSD)
+	}
+	// gemini-3.1-pro input rate is $2/1M, cache-hit rate is 0.25x that.
+	want := 2 * 0.25
+	if allCached.InputUSD < want-0.0001 || allCached.InputUSD > want+0.0001 {
+		t.Fatalf("Gemini cache-hit pricing: got %.4f, want %.4f", allCached.InputUSD, want)
+	}
+}
+
+// TestForUsage_ModelWithNoCacheRatesConfigured_NoDiscountAssumed is the
+// safety-net test for the per-model-configured design: a model that never
+// had cache rates set (llama-4-scout has no prompt-caching support at all)
+// must not silently inherit some other provider's discount ratio if cache
+// token counts ever showed up in its usage — better to price it as regular
+// input (no discount, no premium) than guess wrong.
+func TestForUsage_ModelWithNoCacheRatesConfigured_NoDiscountAssumed(t *testing.T) {
+	got := ForUsage("llama-4-scout", schema.Usage{PromptTokens: 1_000_000, CacheReadInputTokens: 1_000_000})
+	want := ForUsage("llama-4-scout", schema.Usage{PromptTokens: 1_000_000})
+	if got.InputUSD != want.InputUSD {
+		t.Fatalf("expected an unconfigured model's cache tokens to price at the plain input rate: got %.4f, want %.4f", got.InputUSD, want.InputUSD)
+	}
+}

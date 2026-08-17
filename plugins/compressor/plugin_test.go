@@ -119,83 +119,23 @@ func TestIntercept_CompressesOversizedToolResult(t *testing.T) {
 	}
 }
 
-// TestIntercept_CompressesJSONToolResultViaSchemaForm confirms the JSON
-// path actually fires through the real Intercept entry point, not just via
-// direct calls to compressJSON.
-func TestIntercept_CompressesJSONToolResultViaSchemaForm(t *testing.T) {
-	p := New(4000) // threshold high enough that only the JSON restructuring matters here
-	longJSON := `[
-  {"id": 1, "name": "alice", "status": "active"},
-  {"id": 2, "name": "bob", "status": "active"},
-  {"id": 3, "name": "carol", "status": "inactive"}
-]`
-	req := &schema.RequestEnvelope{
-		Messages: []schema.Message{
-			{Role: "user", Content: "old question"},
-			{Role: "tool", ToolCallID: "t1", Content: longJSON},
-			{Role: "user", Content: "new question"},
-		},
-	}
-	if err := p.Intercept(context.Background(), req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	got := req.Messages[1].Content
-	if !strings.HasPrefix(got, "schema: id, name, status") {
-		t.Fatalf("expected schema-form output, got %q", got)
-	}
-	if len(got) >= len(longJSON) {
-		t.Errorf("expected schema-form to shrink content: got len=%d, original len=%d", len(got), len(longJSON))
-	}
-}
-
-// TestIntercept_StripsCommentsFromCodeToolResult confirms the comment
-// stripper fires through the real Intercept entry point, not just via
-// direct calls to stripComments.
-func TestIntercept_StripsCommentsFromCodeToolResult(t *testing.T) {
-	p := New(4000) // threshold high enough that only comment-stripping matters here
-	code := "func main() {\n\t// this is just noise\n\tfmt.Println(\"hi\")\n}"
-	req := &schema.RequestEnvelope{
-		Messages: []schema.Message{
-			{Role: "user", Content: "old question"},
-			{Role: "tool", ToolCallID: "t1", Content: code},
-			{Role: "user", Content: "new question"},
-		},
-	}
-	if err := p.Intercept(context.Background(), req); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	got := req.Messages[1].Content
-	if strings.Contains(got, "this is just noise") {
-		t.Errorf("expected the comment stripped, got %q", got)
-	}
-	if !strings.Contains(got, `fmt.Println("hi")`) {
-		t.Errorf("expected real code preserved, got %q", got)
-	}
-}
-
 // --- compress (byte-for-byte) ---
 
 func TestCompress_BelowThreshold_ReturnsCollapsedButUntruncated(t *testing.T) {
 	in := "line one\nline two"
-	got, omitted := compress(in, 1000)
+	got := compress(in, 1000)
 	want := "line one\nline two"
 	if got != want {
 		t.Errorf("compress(%q) = %q, want %q", in, got, want)
-	}
-	if omitted != 0 {
-		t.Errorf("expected omittedChars=0 when nothing was truncated, got %d", omitted)
 	}
 }
 
 func TestCompress_TruncatesPastMaxChars(t *testing.T) {
 	in := strings.Repeat("a", 100)
-	got, omitted := compress(in, 10)
+	got := compress(in, 10)
 	want := strings.Repeat("a", 10) + "\n... [truncated 90 chars]"
 	if got != want {
 		t.Errorf("compress(%q, 10) = %q, want %q", in, got, want)
-	}
-	if omitted != 90 {
-		t.Errorf("expected omittedChars=90, got %d", omitted)
 	}
 }
 

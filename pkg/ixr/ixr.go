@@ -24,7 +24,7 @@ import (
 	"github.com/YashVishwas/ixr/plugins/banditreward"
 	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
-	"github.com/YashVishwas/ixr/plugins/compressor"
+	feedbackplugin "github.com/YashVishwas/ixr/plugins/feedback"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
@@ -52,6 +52,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	domainfeedback "github.com/YashVishwas/ixr/internal/domain/feedback"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
@@ -178,9 +179,20 @@ func Start(opts ...Option) error {
 	// deployments see no behavior change) unless explicitly enabled. Shares
 	// the same bandit instance as shadow routing above, so exploration and
 	// reward from both paths reinforce one set of arm statistics.
+	var feedbackStore *domainfeedback.Store
 	if os.Getenv("IXR_AUTO_BANDIT") == "true" {
 		scoringEngine.SetBandit(bandit)
 		mgr.Register(banditreward.New(bandit))
+
+		// Caller feedback (POST /v1/feedback) strengthens the same
+		// bandit's quality signal beyond banditreward's coarse, free
+		// FinishReason proxy — a real human rating, when a caller
+		// chooses to submit one. Indexing (feedbackplugin) and the HTTP
+		// handler (registered below, alongside the other non-chat
+		// endpoints) share one Store instance. Meaningless without
+		// auto-routing enabled, so it's gated the same way.
+		feedbackStore = domainfeedback.NewStore(envInt("IXR_FEEDBACK_STORE_SIZE", 10_000), time.Duration(envInt("IXR_FEEDBACK_TTL_SEC", 3600))*time.Second)
+		mgr.Register(feedbackplugin.New(feedbackStore))
 	}
 
 	// --- Semantic cache ---
@@ -238,23 +250,8 @@ func Start(opts ...Option) error {
 	// store, so both sides need the one instance.
 	var retrievalStore *retrieval.Store
 	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" && os.Getenv("IXR_COMPRESS_REVERSIBLE") == "true" {
-		// IXR_RETRIEVAL_REDIS_ADDR opts into a shared backend so a
-		// retrieval ID minted by one ixr replica can be resolved by
-		// another sitting behind the same load balancer — the default
-		// in-memory backend is single-instance only (see
-		// internal/domain/retrieval.Backend's doc comment). Unset means
-		// exactly the pre-feature in-memory behavior; never mandatory.
-		if redisAddr := os.Getenv("IXR_RETRIEVAL_REDIS_ADDR"); redisAddr != "" {
-			redisClient := redis.NewClient(&redis.Options{
-				Addr:     redisAddr,
-				Password: os.Getenv("IXR_RETRIEVAL_REDIS_PASSWORD"),
-				DB:       envInt("IXR_RETRIEVAL_REDIS_DB", 0),
-			})
-			retrievalStore = retrieval.NewStoreWithBackend(retrievalstore.New(redisClient))
-		} else {
-			retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
-			retrievalStore = retrieval.NewStore(retrievalStoreSize)
-		}
+		retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
+		retrievalStore = retrieval.NewStore(retrievalStoreSize)
 	}
 
 	// --- Chat handler ---
@@ -417,6 +414,14 @@ func Start(opts ...Option) error {
 	imagesHandler := ingress.NewImagesHandler(router)
 	mux.Handle("POST /v1/images/generations", obs(authMW.Handler(imagesHandler)))
 
+	// Feedback (RFC Gap 12 quality signal) — only registered when
+	// auto-bandit is enabled; feedbackStore is nil otherwise and there's
+	// nothing meaningful for this endpoint to do.
+	if feedbackStore != nil {
+		feedbackHandler := ingress.NewFeedbackHandler(feedbackStore, bandit)
+		mux.Handle("POST /v1/feedback", obs(authMW.Handler(feedbackHandler)))
+	}
+
 	// Schema and metrics are unauthenticated
 	mux.Handle("GET /v1/schema", ingress.NewSchemaHandler())
 	mux.Handle("GET /metrics", observability.Handler(promReg))
@@ -464,15 +469,30 @@ func Start(opts ...Option) error {
 		slog.Info("pprof debug server listening", "addr", addr)
 	}
 
+	// --- Request body size cap ---
+	// Wraps the whole mux (not each handler individually) so a new
+	// endpoint added later is covered automatically. Every current
+	// JSON-decoding handler/middleware reads r.Body directly with no
+	// limit of its own — several re-decode/re-marshal the same body more
+	// than once as it passes through the interceptor/memory/session
+	// chain, multiplying the cost of one oversized request. Defaults on
+	// (unlike most opt-in features here) since this is a resource-
+	// exhaustion guard, not a behavior change a caller would notice
+	// until they send something unreasonably large; <=0 disables it.
+	maxBodyBytes := int64(envInt("IXR_MAX_REQUEST_BODY_BYTES", 10<<20)) // 10MB
+	bodyLimitMW := ingress.NewBodyLimitMiddleware(maxBodyBytes)
+	limitedMux := http.NewServeMux()
+	limitedMux.Handle("/", bodyLimitMW.Handler(mux))
+
 	// --- Server (TLS or plain) ---
 	if fileCfg != nil && fileCfg.Server.TLSCert != "" {
-		srv, tlsErr := ingress.NewServerTLS(port, mux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
+		srv, tlsErr := ingress.NewServerTLS(port, limitedMux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
 		if tlsErr != nil {
 			return fmt.Errorf("TLS setup: %w", tlsErr)
 		}
 		return srv.Run(ctx)
 	}
-	return ingress.NewServer(port, mux).Run(ctx)
+	return ingress.NewServer(port, limitedMux).Run(ctx)
 }
 
 func envInt(key string, def int) int {

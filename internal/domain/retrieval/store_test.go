@@ -2,7 +2,6 @@ package retrieval
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -91,79 +90,4 @@ func TestStore_ConcurrentPutGet_NoRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-}
-
-// fakeBackend is a minimal Backend used to prove Store correctly delegates
-// to whatever backend it's given, independent of memoryBackend's own logic.
-type fakeBackend struct {
-	getErr     error
-	getOK      bool
-	getContent string
-	putCalls   []struct{ id, content string }
-}
-
-func (f *fakeBackend) Put(_ context.Context, id, content string, _ time.Duration) error {
-	f.putCalls = append(f.putCalls, struct{ id, content string }{id, content})
-	return nil
-}
-
-func (f *fakeBackend) Get(_ context.Context, _ string) (string, bool, error) {
-	return f.getContent, f.getOK, f.getErr
-}
-
-func TestStore_WithBackend_PutDelegatesToBackend(t *testing.T) {
-	fb := &fakeBackend{}
-	s := NewStoreWithBackend(fb)
-	id := s.Put(context.Background(), "hello", time.Minute)
-
-	if len(fb.putCalls) != 1 {
-		t.Fatalf("expected exactly 1 Put on the backend, got %d", len(fb.putCalls))
-	}
-	if fb.putCalls[0].id != id || fb.putCalls[0].content != "hello" {
-		t.Errorf("backend received (%q, %q), want (%q, %q)", fb.putCalls[0].id, fb.putCalls[0].content, id, "hello")
-	}
-}
-
-func TestStore_WithBackend_GetErrorDegradesToMiss(t *testing.T) {
-	fb := &fakeBackend{getErr: errors.New("backend unreachable"), getOK: true, getContent: "should never surface"}
-	s := NewStoreWithBackend(fb)
-
-	got, ok := s.Get(context.Background(), "ret_whatever")
-	if ok {
-		t.Fatal("expected a miss when the backend errors, not a hit — must degrade, not hang or propagate the error")
-	}
-	if got != "" {
-		t.Errorf("expected empty content on a degraded miss, got %q", got)
-	}
-}
-
-func TestStore_TwoInstancesSharingABackend_DistinctIDsNeverCollide(t *testing.T) {
-	// Simulates two ixr replicas sharing one backend (the point of
-	// NewStoreWithBackend): each mints its own IDs independently, and they
-	// must never collide, or one replica's Get could resolve to another
-	// replica's content.
-	shared := newMemoryBackend(0)
-	replicaA := NewStoreWithBackend(shared)
-	replicaB := NewStoreWithBackend(shared)
-
-	var idsA, idsB []string
-	for i := 0; i < 200; i++ {
-		idsA = append(idsA, replicaA.Put(context.Background(), "from-a", time.Minute))
-		idsB = append(idsB, replicaB.Put(context.Background(), "from-b", time.Minute))
-	}
-
-	seen := make(map[string]bool, 400)
-	for _, id := range append(idsA, idsB...) {
-		if seen[id] {
-			t.Fatalf("ID collision across replicas: %q", id)
-		}
-		seen[id] = true
-	}
-
-	// And a replica can resolve an ID minted by the other, proving the
-	// shared backend actually shares state (not just avoids collisions).
-	got, ok := replicaB.Get(context.Background(), idsA[0])
-	if !ok || got != "from-a" {
-		t.Errorf("replicaB.Get(idsA[0]) = (%q, %v), want (%q, true)", got, ok, "from-a")
-	}
 }
