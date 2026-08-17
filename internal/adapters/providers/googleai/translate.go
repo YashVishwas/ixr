@@ -3,7 +3,6 @@ package googleai
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -29,12 +28,28 @@ type genContent struct {
 	Parts []genPart `json:"parts"`
 }
 
-// genPart is a one-of: exactly one of Text, FunctionCall, or
-// FunctionResponse is set, matching Gemini's part shape.
+// genPart is a one-of: exactly one of Text, FunctionCall, FunctionResponse,
+// InlineData, or FileData is set, matching Gemini's part shape.
 type genPart struct {
 	Text             string               `json:"text,omitempty"`
 	FunctionCall     *genFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *genFunctionResponse `json:"functionResponse,omitempty"`
+	InlineData       *genInlineData       `json:"inlineData,omitempty"`
+	FileData         *genFileData         `json:"fileData,omitempty"`
+}
+
+// genInlineData is Gemini's inline-base64 image part.
+type genInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+// genFileData is Gemini's URL-referenced image part — Gemini fetches it
+// itself, the same role a "url"-type source plays in Anthropic's/Bedrock's
+// image content blocks.
+type genFileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
 }
 
 type genFunctionCall struct {
@@ -124,18 +139,6 @@ func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 	}
 
 	for _, m := range req.Messages {
-		if len(m.Parts) > 0 {
-			// Vision (RFC Gap 10) isn't wired for this adapter yet — only
-			// OpenAI, openaicompat, and Anthropic translate m.Parts today.
-			// m.Content already carries the flattened text (see
-			// pkg/schema/content.go's UnmarshalJSON), so the request still
-			// goes through as text-only rather than erroring or sending a
-			// malformed body — but silently, with no signal to the caller
-			// that the image was dropped. Surface that here so it's at
-			// least visible to the operator instead of a mystery "why did
-			// the model ignore my image" support ticket.
-			slog.Warn("googleai: message has image/multipart content but this adapter only forwards text; image dropped", "role", m.Role)
-		}
 		if m.Role == "tool" {
 			name := m.Name
 			if name == "" {
@@ -177,6 +180,14 @@ func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 			}
 			appendOrMerge("assistant", m.Content)
 		case "user":
+			if len(m.Parts) > 0 {
+				// Multimodal — build a dedicated content entry with one
+				// part per Part (text and/or image) rather than routing
+				// through appendOrMerge, which only handles a single text
+				// string and would merge this into a plain-text neighbor.
+				contents = append(contents, genContent{Role: "user", Parts: toGenParts(m)})
+				continue
+			}
 			appendOrMerge("user", m.Content)
 		default:
 			appendOrMerge("user", m.Content)
@@ -194,6 +205,55 @@ func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
 		}
 	}
 	return out
+}
+
+// toGenParts converts a multimodal message's Parts into Gemini parts: a
+// text part per "text" Part, an inline-base64 or file-URI image part per
+// "image_url" Part. Mirrors the Anthropic/Bedrock adapters'
+// toWireContentBlocks/toContentBlocks, since all three ultimately serve the
+// same canonical schema.ContentPart shape.
+func toGenParts(m schema.Message) []genPart {
+	parts := make([]genPart, 0, len(m.Parts))
+	for _, p := range m.Parts {
+		switch p.Type {
+		case "text":
+			if strings.TrimSpace(p.Text) != "" {
+				parts = append(parts, genPart{Text: p.Text})
+			}
+		case "image_url":
+			if p.ImageURL != nil {
+				parts = append(parts, toImagePart(p.ImageURL.URL))
+			}
+		}
+	}
+	return parts
+}
+
+// toImagePart builds a Gemini image part from an image_url part's URL: a
+// data: URI decodes into an inline base64 part (mime type + payload
+// extracted directly, no re-encoding); any other URL is passed as a
+// fileData part, which Gemini fetches itself.
+func toImagePart(url string) genPart {
+	if mimeType, data, ok := parseImageDataURI(url); ok {
+		return genPart{InlineData: &genInlineData{MimeType: mimeType, Data: data}}
+	}
+	return genPart{FileData: &genFileData{FileURI: url}}
+}
+
+// parseImageDataURI extracts the mime type and base64 payload from a
+// "data:image/png;base64,AAAA..." URI.
+func parseImageDataURI(uri string) (mimeType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", false
+	}
+	rest := uri[len(prefix):]
+	const marker = ";base64,"
+	idx := strings.Index(rest, marker)
+	if idx < 0 {
+		return "", "", false
+	}
+	return rest[:idx], rest[idx+len(marker):], true
 }
 
 func toGenTools(tools []schema.Tool) []genTool {

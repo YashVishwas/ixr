@@ -193,7 +193,28 @@ func Start(opts ...Option) error {
 		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
 		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
 		defer semanticBackend.Close()
-		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+		semanticCache := cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+
+		// Quality tier (opt-in): catches paraphrase-level matches the fast
+		// WordVectorizer token-overlap approximation misses (e.g. "summarize
+		// this" vs "give me a summary"), by embedding through a real
+		// provider on Store (async, off the request path) and consulting it
+		// on Lookup only as a fallback after the fast tier misses, bounded by
+		// IXR_CACHE_QUALITY_TIMEOUT_MS rather than the fast path's fixed 5ms.
+		// Requires an OpenAI provider to already be configured — this reuses
+		// that adapter rather than standing up a separate credential path.
+		if os.Getenv("IXR_CACHE_QUALITY_EMBEDDER") == "true" {
+			if embedder, ok := registry["openai"].(provider.Embedder); ok {
+				model := envString("IXR_CACHE_QUALITY_MODEL", "text-embedding-3-small")
+				qualityBackend := cache.NewMemorySemanticBackend(cacheSize)
+				timeout := time.Duration(envInt("IXR_CACHE_QUALITY_TIMEOUT_MS", 150)) * time.Millisecond
+				semanticCache.WithQualityTier(cache.ProviderEmbedder{Provider: embedder, Model: model}, qualityBackend, timeout)
+			} else {
+				slog.Warn("IXR_CACHE_QUALITY_EMBEDDER=true but no OpenAI provider is configured; quality tier disabled")
+			}
+		}
+
+		responseCache = semanticCache
 	}
 
 	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
@@ -370,15 +391,23 @@ func Start(opts ...Option) error {
 		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
 	}
 
-	// Chat completions: auth → rate limit → interceptors → memory → session → cache → chat
+	// Admission control (RFC Gap 13, opt-in): caps aggregate in-flight
+	// requests regardless of which model is requested — complementary to
+	// per-model circuit breaking, not redundant with it. Checked before
+	// rate limiting (which does per-identity accounting work of its own)
+	// since there's no point doing that work if the system is already
+	// globally saturated. 0/unset disables it entirely.
+	admissionMW := ingress.NewAdmissionMiddleware(envInt("IXR_MAX_INFLIGHT", 0))
+
+	// Chat completions: auth → admission control → rate limit → interceptors → memory → session → cache → chat
 	// Memory sits outside session (per MemoryMiddleware's doc comment) so the
 	// memory system message is in place before session history is appended.
 	memTopK := envInt("IXR_MEMORY_TOP_K", 5)
-	chatChain := authMW.Handler(rateMW.Handler(
+	chatChain := authMW.Handler(admissionMW.Handler(rateMW.Handler(
 		ingress.NewInterceptorMiddleware(interceptors,
 			ingress.NewMemoryMiddleware(memoryStore, memTopK, middleChain),
 		).WithBus(memBus),
-	))
+	)))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
@@ -460,6 +489,13 @@ func envFloat(key string, def float64) float64 {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
+	}
+	return def
+}
+
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
 	return def
 }
