@@ -11,17 +11,31 @@
 // is already a full pre-routing request transformer with no new interface
 // or chain needed.
 //
-// This is a deliberately narrow first cut: collapsing repeated lines and
-// truncating past a configurable length, not a semantic compressor. It
-// never touches the system prompt or the caller's own latest turn — only
-// tool-result messages and older history are eligible.
+// Still deliberately narrow, not a semantic compressor: valid JSON gets a
+// structure-aware pass (see json.go), everything else gets line-oriented
+// collapsing, and anything still oversized after that gets truncated with a
+// marker. It never touches the system prompt or the caller's own latest
+// turn — only tool-result messages and older history are eligible.
+//
+// Optionally reversible (the Headroom CCR pattern — see
+// internal/domain/retrieval's package doc): when a Store is configured,
+// truncation (the one case here with genuine information loss — whitespace/
+// duplicate-line collapsing isn't) writes the original content to the store
+// and appends a marker telling the model how to ask for it back via the
+// synthetic retrieval tool, which internal/ingress/chat.go resolves.
+// Reversibility is skipped for streaming requests — there's no resolution
+// path for a tool call mid-stream, so offering a tool nothing will ever
+// answer would strand the model. Streaming requests still get plain
+// (irreversible) compression.
 package compressor
 
 import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/YashVishwas/ixr/internal/domain/retrieval"
 	"github.com/YashVishwas/ixr/pkg/guardrail"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
@@ -30,16 +44,26 @@ var _ guardrail.RequestInterceptor = (*Plugin)(nil)
 
 const defaultMaxChars = 4000
 
+// Store is satisfied by *retrieval.Store — kept as an interface here so
+// this package doesn't need to know about retrieval.Store's concrete type
+// beyond the two methods it actually calls.
+type Store interface {
+	Put(ctx context.Context, content string, ttl time.Duration) string
+}
+
 // Plugin compresses eligible message content before the request is routed,
 // cached, or sent to a provider. It never blocks — Intercept always returns
 // nil — so it's safe to chain alongside interceptors that do (e.g.
 // plugins/budget).
 type Plugin struct {
 	maxChars int
+	store    Store // nil = destructive compression (default)
+	ttl      time.Duration
 }
 
-// New creates a compressor. maxChars <= 0 uses defaultMaxChars (4000,
-// ~1000 tokens at the standard 4-chars-per-token estimate).
+// New creates a destructive-mode compressor. maxChars <= 0 uses
+// defaultMaxChars (4000, ~1000 tokens at the standard 4-chars-per-token
+// estimate).
 func New(maxChars int) *Plugin {
 	if maxChars <= 0 {
 		maxChars = defaultMaxChars
@@ -47,13 +71,27 @@ func New(maxChars int) *Plugin {
 	return &Plugin{maxChars: maxChars}
 }
 
+// NewReversible creates a compressor that stores originals in store before
+// truncating, so the model can ask for the full content back instead of
+// losing it. ttl<=0 means stored originals never expire (still subject to
+// the store's own size bound, if any).
+func NewReversible(maxChars int, store Store, ttl time.Duration) *Plugin {
+	p := New(maxChars)
+	p.store = store
+	p.ttl = ttl
+	return p
+}
+
 // Name returns the stable plugin identifier.
 func (p *Plugin) Name() string { return "request-compressor" }
 
 // Intercept compresses eligible messages in place. It never returns an
 // error — compression is a size optimization, not a policy gate.
-func (p *Plugin) Intercept(_ context.Context, req *schema.RequestEnvelope) error {
+func (p *Plugin) Intercept(ctx context.Context, req *schema.RequestEnvelope) error {
+	reversible := p.store != nil && !req.Stream
 	liveTurn := lastUserMessageIndex(req.Messages)
+	injectedTool := false
+
 	for i := range req.Messages {
 		if i == liveTurn {
 			continue // never touch the caller's own live turn
@@ -62,7 +100,17 @@ func (p *Plugin) Intercept(_ context.Context, req *schema.RequestEnvelope) error
 		if !eligible(m) {
 			continue
 		}
-		m.Content = compress(m.Content, p.maxChars)
+
+		result, omittedChars := compress(m.Content, p.maxChars)
+		if reversible && omittedChars > 0 {
+			id := p.store.Put(ctx, m.Content, p.ttl)
+			result += retrieval.Marker(id, omittedChars)
+			if !injectedTool {
+				req.Tools = append(req.Tools, retrieval.Tool())
+				injectedTool = true
+			}
+		}
+		m.Content = result
 	}
 	return nil
 }
@@ -96,15 +144,38 @@ func lastUserMessageIndex(messages []schema.Message) int {
 	return -1
 }
 
-// compress collapses redundant whitespace/duplicate lines, then truncates
-// with a marker if the result still exceeds maxChars. Below maxChars after
-// collapsing, it's a no-op beyond that collapsing.
-func compress(content string, maxChars int) string {
-	collapsed := collapseRepeatedLines(collapseBlankLines(content))
-	if len(collapsed) <= maxChars {
-		return collapsed
+// compress applies content-aware compression, then truncates with a marker
+// if the result still exceeds maxChars. Valid JSON goes through
+// compressJSON (structure-aware — see json.go), which already does its own
+// deduplication (schema-form collapses repeated keys, the only thing
+// json.Marshal's compact fallback could ever have in common with the line
+// heuristic is that neither has anything left to collapse). Non-JSON
+// content that looks like code goes through stripComments first (see
+// code.go) — full-line comments only, never inline, never import lines.
+// Whatever's left after either of those (or the original content, if
+// neither applied) still goes through line-oriented collapsing. Below
+// maxChars after that, it's a no-op beyond whatever collapsing already did.
+//
+// omittedChars is 0 when nothing was truncated (collapsing alone, even if
+// it changed the content, doesn't lose information the way cutting off the
+// tail does) — Intercept uses it to decide whether this compression needs a
+// retrieval marker in reversible mode, and callers should not recompute it
+// from the original content length themselves: it's measured against the
+// collapsed length, which can differ from the original.
+func compress(content string, maxChars int) (result string, omittedChars int) {
+	collapsed, ok := compressJSON(content)
+	if !ok {
+		base := content
+		if stripped, ok := stripComments(content); ok {
+			base = stripped
+		}
+		collapsed = collapseRepeatedLines(collapseBlankLines(base))
 	}
-	return collapsed[:maxChars] + fmt.Sprintf("\n... [truncated %d chars]", len(collapsed)-maxChars)
+	if len(collapsed) <= maxChars {
+		return collapsed, 0
+	}
+	omitted := len(collapsed) - maxChars
+	return collapsed[:maxChars] + fmt.Sprintf("\n... [truncated %d chars]", omitted), omitted
 }
 
 // collapseBlankLines trims trailing whitespace from each line and collapses

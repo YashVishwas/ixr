@@ -58,7 +58,7 @@ func TestCompressorAndCacheControl_ComposeOnSameRequest(t *testing.T) {
 		t.Fatalf("expected the tool result to be compressed, got len=%d (original len=%d)", len(req.Messages[2].Content), len(longToolResult))
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	// cache_control must still be present on the (untouched) system block.
 	if len(got.System) != 1 || got.System[0].CacheControl == nil {
@@ -90,7 +90,7 @@ func TestCacheControl_NeverAppliedOutsideSystemBlock(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	if len(got.System) != 1 || got.System[0].CacheControl == nil {
 		t.Fatalf("expected cache_control on the system block, got %+v", got.System)
