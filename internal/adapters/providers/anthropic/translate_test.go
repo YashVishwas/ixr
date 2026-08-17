@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/YashVishwas/ixr/pkg/schema"
@@ -19,8 +20,11 @@ func TestToWireRequest_SystemLifted(t *testing.T) {
 
 	got := toWireRequest(req)
 
-	if got.System != "be concise" {
-		t.Errorf("system: got %q, want %q", got.System, "be concise")
+	if len(got.System) != 1 || got.System[0].Text != "be concise" {
+		t.Errorf("system: got %+v, want a single block with text %q", got.System, "be concise")
+	}
+	if got.System[0].CacheControl != nil {
+		t.Errorf("system: expected no cache_control on a short system prompt, got %+v", got.System[0].CacheControl)
 	}
 	if len(got.Messages) != 3 {
 		t.Errorf("messages: got %d, want 3 (system must be removed)", len(got.Messages))
@@ -68,11 +72,51 @@ func TestToWireRequest_NoSystem(t *testing.T) {
 
 	got := toWireRequest(req)
 
-	if got.System != "" {
-		t.Errorf("system: got %q, want empty", got.System)
+	if len(got.System) != 0 {
+		t.Errorf("system: got %+v, want empty", got.System)
 	}
 	if len(got.Messages) != 1 {
 		t.Errorf("messages: got %d, want 1", len(got.Messages))
+	}
+}
+
+func TestToWireRequest_SystemCaching(t *testing.T) {
+	short := strings.Repeat("a ", 100) // well under 1024 tokens at ~4 chars/token
+	long := strings.Repeat("a ", 5000) // well over 1024 tokens
+
+	cases := []struct {
+		name      string
+		model     string
+		system    string
+		wantCache bool
+	}{
+		{"sonnet below threshold", "claude-3-5-sonnet-20241022", short, false},
+		{"sonnet above threshold", "claude-3-5-sonnet-20241022", long, true},
+		{"opus above threshold", "claude-3-opus-20240229", long, true},
+		{"haiku above sonnet threshold but below haiku's own", "claude-3-5-haiku-20241022", strings.Repeat("a ", 1500), false},
+		{"haiku above its own higher threshold", "claude-3-5-haiku-20241022", strings.Repeat("a ", 5000), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := &schema.RequestEnvelope{
+				Model: c.model,
+				Messages: []schema.Message{
+					{Role: "system", Content: c.system},
+					{Role: "user", Content: "hello"},
+				},
+			}
+			got := toWireRequest(req)
+			if len(got.System) != 1 {
+				t.Fatalf("expected exactly one system block, got %d", len(got.System))
+			}
+			hasCache := got.System[0].CacheControl != nil
+			if hasCache != c.wantCache {
+				t.Errorf("cache_control present = %v, want %v", hasCache, c.wantCache)
+			}
+			if hasCache && got.System[0].CacheControl.Type != "ephemeral" {
+				t.Errorf("cache_control.Type = %q, want %q", got.System[0].CacheControl.Type, "ephemeral")
+			}
+		})
 	}
 }
 
@@ -301,6 +345,46 @@ func TestFromWireResponse_ToolOnlyResponse(t *testing.T) {
 	}
 	if got.Choices[0].FinishReason != "tool_calls" {
 		t.Errorf("finish_reason: got %q, want tool_calls", got.Choices[0].FinishReason)
+	}
+}
+
+// TestFromWireResponse_CacheTokensCountTowardPromptTokens is the regression
+// test for a bug this change would otherwise introduce: Anthropic reports
+// input_tokens as only the *non-cached* portion of the prompt when
+// cache_control is used — cache_read_input_tokens and
+// cache_creation_input_tokens are separate, additive counts. PromptTokens
+// must sum all three, or a cached call would silently under-report its
+// actual prompt size relative to every other provider's PromptTokens
+// meaning (and relative to what ixr actually paid for, cache discount
+// aside).
+func TestFromWireResponse_CacheTokensCountTowardPromptTokens(t *testing.T) {
+	wr := &wireResponse{
+		ID:         "msg_cached",
+		Model:      "claude-3-5-sonnet-20241022",
+		Content:    []wireContent{{Type: "text", Text: "hi"}},
+		StopReason: "end_turn",
+		Usage: wireUsage{
+			InputTokens:              10, // the new, non-cached portion
+			OutputTokens:             4,
+			CacheReadInputTokens:     1200,
+			CacheCreationInputTokens: 0,
+		},
+	}
+
+	got, err := fromWireResponse(wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	const wantPrompt = 10 + 1200
+	if got.Usage.PromptTokens != wantPrompt {
+		t.Errorf("prompt_tokens: got %d, want %d (input + cache_read)", got.Usage.PromptTokens, wantPrompt)
+	}
+	if got.Usage.TotalTokens != wantPrompt+4 {
+		t.Errorf("total_tokens: got %d, want %d", got.Usage.TotalTokens, wantPrompt+4)
+	}
+	if got.Usage.CacheReadInputTokens != 1200 {
+		t.Errorf("cache_read_input_tokens: got %d, want 1200", got.Usage.CacheReadInputTokens)
 	}
 }
 
