@@ -100,6 +100,15 @@ type genUsage struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 	TotalTokenCount      int `json:"totalTokenCount"`
+	// CachedContentTokenCount is populated whenever context caching
+	// applies — either implicit (automatic on 2.x+ models, no request-side
+	// code needed) or explicit (a CachedContent resource referenced via
+	// cachedContent, not implemented by this adapter). Either way it's a
+	// subset of PromptTokenCount billed at Gemini's discounted cached-
+	// input rate — see internal/domain/routing's CachedInputUSDPer1M on
+	// the Gemini catalog entries and internal/domain/cost.ForUsage, which
+	// is where the discount is actually applied.
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 }
 
 func toGenWireRequest(req *schema.RequestEnvelope) genWireRequest {
@@ -324,9 +333,10 @@ func fromGenWireResponse(model string, wr *genWireResponse) (*schema.ResponseEnv
 			},
 		},
 		Usage: schema.Usage{
-			PromptTokens:     wr.UsageMetadata.PromptTokenCount,
-			CompletionTokens: wr.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      wr.UsageMetadata.TotalTokenCount,
+			PromptTokens:         wr.UsageMetadata.PromptTokenCount,
+			CompletionTokens:     wr.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:          wr.UsageMetadata.TotalTokenCount,
+			CacheReadInputTokens: wr.UsageMetadata.CachedContentTokenCount,
 		},
 	}, nil
 }
