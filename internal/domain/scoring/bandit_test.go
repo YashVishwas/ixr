@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/YashVishwas/ixr/internal/domain/routing"
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
 var testCandidates = []routing.Candidate{
@@ -107,6 +108,29 @@ func TestRewardFunction(t *testing.T) {
 	rWorst := Reward(0, 0, false, 0.0, 1.0, 1.0, w)
 	if rWorst != 0 {
 		t.Errorf("worst reward: got %f, want 0", rWorst)
+	}
+}
+
+func TestQualityFromFinishReason(t *testing.T) {
+	cases := []struct {
+		name    string
+		choices []schema.Choice
+		want    float64
+	}{
+		{"no choices at all", nil, 0},
+		{"empty choices slice", []schema.Choice{}, 0},
+		{"clean stop", []schema.Choice{{FinishReason: "stop"}}, 1.0},
+		{"tool call completion", []schema.Choice{{FinishReason: "tool_calls"}}, 1.0},
+		{"truncated", []schema.Choice{{FinishReason: "length"}}, 0.3},
+		{"content filtered", []schema.Choice{{FinishReason: "content_filter"}}, 0.0},
+		{"unrecognized reason", []schema.Choice{{FinishReason: "something_provider_specific"}}, 0.5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := QualityFromFinishReason(c.choices); got != c.want {
+				t.Errorf("QualityFromFinishReason(%+v) = %f, want %f", c.choices, got, c.want)
+			}
+		})
 	}
 }
 
