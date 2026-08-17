@@ -257,7 +257,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ev.TokensIn = resp.Usage.PromptTokens
 			ev.TokensOut = resp.Usage.CompletionTokens
 			ev.Response = *resp
-			ev.Cost = cost.ForUsage(usedModel, ev.TokensIn, ev.TokensOut)
+			ev.Cost = cost.ForUsage(usedModel, resp.Usage)
 			ev.FallbackUsed = result.FallbackUsed
 			ev.FallbackFrom = result.FallbackFrom
 		}
@@ -300,13 +300,15 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 
 	writeSSEHeader(w)
 
-	var totalIn, totalOut int
+	var totalIn, totalOut, totalCacheRead, totalCacheCreation int
 	start := time.Now()
 
 	onChunk := func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
+			totalCacheRead = chunk.Usage.CacheReadInputTokens
+			totalCacheCreation = chunk.Usage.CacheCreationInputTokens
 		}
 		if err := writeSSEChunk(w, chunk); err != nil {
 			return err
@@ -376,7 +378,12 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
 		} else {
-			ev.Cost = cost.ForUsage(usedModel, totalIn, totalOut)
+			ev.Cost = cost.ForUsage(usedModel, schema.Usage{
+				PromptTokens:             totalIn,
+				CompletionTokens:         totalOut,
+				CacheReadInputTokens:     totalCacheRead,
+				CacheCreationInputTokens: totalCacheCreation,
+			})
 			ev.FallbackUsed = result.FallbackUsed
 			ev.FallbackFrom = result.FallbackFrom
 		}
@@ -431,7 +438,7 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		ev.TokensIn = resp.Usage.PromptTokens
 		ev.TokensOut = resp.Usage.CompletionTokens
 		ev.Response = *resp
-		ev.Cost = cost.ForUsage(shadowModel, ev.TokensIn, ev.TokensOut)
+		ev.Cost = cost.ForUsage(shadowModel, resp.Usage)
 	}
 	_ = h.bus.Publish(ctx, ev)
 }
