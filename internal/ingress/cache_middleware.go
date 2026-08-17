@@ -147,7 +147,17 @@ type bytesReader struct {
 
 func (br *bytesReader) Read(p []byte) (int, error) {
 	if br.pos >= len(br.data) {
-		return 0, nil
+		// io.Reader's contract requires io.EOF once exhausted — returning
+		// (0, nil) tells callers "no progress, but not done, try again,"
+		// which json.Decoder's underlying buffered reader takes literally:
+		// faced with an incomplete JSON value, it keeps calling Read for
+		// more input, and an exhausted reader that never signals EOF spins
+		// forever instead of surfacing a decode error. Unreachable for a
+		// complete, well-formed replayed body (Decode stops calling Read
+		// once it has a full value) but very reachable for a truncated one
+		// — exactly what a caller replays after http.MaxBytesReader cuts a
+		// body off mid-stream, or after any other partial/malformed read.
+		return 0, io.EOF
 	}
 	n := copy(p, br.data[br.pos:])
 	br.pos += n
