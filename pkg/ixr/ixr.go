@@ -190,7 +190,28 @@ func Start(opts ...Option) error {
 		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
 		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
 		defer semanticBackend.Close()
-		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+		semanticCache := cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+
+		// Quality tier (opt-in): catches paraphrase-level matches the fast
+		// WordVectorizer token-overlap approximation misses (e.g. "summarize
+		// this" vs "give me a summary"), by embedding through a real
+		// provider on Store (async, off the request path) and consulting it
+		// on Lookup only as a fallback after the fast tier misses, bounded by
+		// IXR_CACHE_QUALITY_TIMEOUT_MS rather than the fast path's fixed 5ms.
+		// Requires an OpenAI provider to already be configured — this reuses
+		// that adapter rather than standing up a separate credential path.
+		if os.Getenv("IXR_CACHE_QUALITY_EMBEDDER") == "true" {
+			if embedder, ok := registry["openai"].(provider.Embedder); ok {
+				model := envString("IXR_CACHE_QUALITY_MODEL", "text-embedding-3-small")
+				qualityBackend := cache.NewMemorySemanticBackend(cacheSize)
+				timeout := time.Duration(envInt("IXR_CACHE_QUALITY_TIMEOUT_MS", 150)) * time.Millisecond
+				semanticCache.WithQualityTier(cache.ProviderEmbedder{Provider: embedder, Model: model}, qualityBackend, timeout)
+			} else {
+				slog.Warn("IXR_CACHE_QUALITY_EMBEDDER=true but no OpenAI provider is configured; quality tier disabled")
+			}
+		}
+
+		responseCache = semanticCache
 	}
 
 	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
@@ -419,6 +440,13 @@ func envFloat(key string, def float64) float64 {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
+	}
+	return def
+}
+
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
 	return def
 }
