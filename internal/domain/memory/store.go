@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,6 +18,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrNotFound is returned by Delete when no entry with the given ID exists
+// for the given user.
+var ErrNotFound = errors.New("memory: entry not found")
 
 // Entry is one stored fact about a user.
 type Entry struct {
@@ -38,6 +43,11 @@ type Store interface {
 	Recent(ctx context.Context, userKey string, n int) ([]Entry, error)
 	// All returns every entry for userKey.
 	All(ctx context.Context, userKey string) ([]Entry, error)
+	// Delete removes the entry with the given ID from userKey's entries.
+	// Returns ErrNotFound if no such entry exists for that user — a
+	// caller can't delete another user's entry by guessing its ID, since
+	// the lookup is scoped to userKey, not global.
+	Delete(ctx context.Context, userKey, entryID string) error
 }
 
 // Defaults applied by NewMemoryStore. Without some bound, entries accumulate
@@ -218,7 +228,19 @@ func (s *MemoryStore) compactNow() {
 		s.entries[userKey] = pruned
 		live = append(live, pruned...)
 	}
+	s.rewriteJournalLocked(live)
+}
 
+// rewriteJournalLocked replaces the on-disk journal with exactly live,
+// dropping anything the journal previously had that isn't in it (expired
+// entries via compactNow, or a deleted entry via Delete — the journal is
+// append-only, so removing something durably means rewriting it, not
+// appending a tombstone). No-op when running in-memory only (filePath
+// unset). Callers must hold s.mu; this acquires s.fileMu itself.
+func (s *MemoryStore) rewriteJournalLocked(live []Entry) {
+	if s.filePath == "" {
+		return
+	}
 	s.fileMu.Lock()
 	defer s.fileMu.Unlock()
 	if s.file != nil {
@@ -229,8 +251,37 @@ func (s *MemoryStore) compactNow() {
 	if af, err := os.OpenFile(s.filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 		s.file = af
 	} else {
-		slog.Warn("memory: journal unavailable after compaction, running in-memory only", "err", err)
+		slog.Warn("memory: journal unavailable after rewrite, running in-memory only", "err", err)
 	}
+}
+
+// Delete removes the entry with the given ID from userKey's entries. The
+// lookup is scoped to userKey, so a caller can't delete another user's
+// entry by guessing its ID. Returns ErrNotFound if no matching entry
+// exists for that user.
+func (s *MemoryStore) Delete(_ context.Context, userKey, entryID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries := s.entries[userKey]
+	idx := -1
+	for i, e := range entries {
+		if e.ID == entryID {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return ErrNotFound
+	}
+	s.entries[userKey] = append(entries[:idx:idx], entries[idx+1:]...)
+
+	var live []Entry
+	for _, es := range s.entries {
+		live = append(live, es...)
+	}
+	s.rewriteJournalLocked(live)
+	return nil
 }
 
 // Close stops background compaction (if running) and flushes/closes the
