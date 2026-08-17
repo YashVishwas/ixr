@@ -217,7 +217,7 @@ func (h *ChatHandler) runChainStep(r *http.Request, chainName, model string, ste
 			ev.TokensIn = result.Response.Usage.PromptTokens
 			ev.TokensOut = result.Response.Usage.CompletionTokens
 			ev.Response = *result.Response
-			ev.Cost = cost.ForUsage(model, ev.TokensIn, ev.TokensOut)
+			ev.Cost = cost.ForUsage(model, result.Response.Usage)
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error (chain step)", "err", pubErr)
@@ -248,7 +248,7 @@ func (h *ChatHandler) streamChainStep(w http.ResponseWriter, r *http.Request, ch
 
 	writeSSEHeader(w)
 
-	var totalIn, totalOut int
+	var totalIn, totalOut, totalCacheRead, totalCacheCreation int
 	start := time.Now()
 	stepReq := &schema.RequestEnvelope{Model: model, Messages: stepMessages}
 
@@ -257,6 +257,8 @@ func (h *ChatHandler) streamChainStep(w http.ResponseWriter, r *http.Request, ch
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
+			totalCacheRead = chunk.Usage.CacheReadInputTokens
+			totalCacheCreation = chunk.Usage.CacheCreationInputTokens
 		}
 		chunk.Model = chainName
 		if err := writeSSEChunk(w, chunk); err != nil {
@@ -307,7 +309,12 @@ func (h *ChatHandler) streamChainStep(w http.ResponseWriter, r *http.Request, ch
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
 		} else {
-			ev.Cost = cost.ForUsage(model, totalIn, totalOut)
+			ev.Cost = cost.ForUsage(model, schema.Usage{
+				PromptTokens:             totalIn,
+				CompletionTokens:         totalOut,
+				CacheReadInputTokens:     totalCacheRead,
+				CacheCreationInputTokens: totalCacheCreation,
+			})
 		}
 		if pubErr := h.bus.Publish(r.Context(), ev); pubErr != nil {
 			slog.Warn("bus publish error (chain stream step)", "err", pubErr)

@@ -15,6 +15,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/cost"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/reasoning"
+	"github.com/YashVishwas/ixr/internal/domain/retrieval"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/internal/observability"
@@ -63,17 +64,26 @@ func WithChains(reg chain.Registry) ChatOption {
 	return func(h *ChatHandler) { h.chains = reg }
 }
 
+// WithRetrieval wires the same *retrieval.Store plugins/compressor writes
+// into when reversible compression is enabled — see resolveRetrieval for
+// how a call to retrieval.ToolName gets resolved rather than passed through
+// to the caller.
+func WithRetrieval(store *retrieval.Store) ChatOption {
+	return func(h *ChatHandler) { h.retrievalStore = store }
+}
+
 // ChatHandler handles POST /v1/chat/completions.
 // It is OpenAI-compatible: existing SDKs point at ixr with no code changes.
 type ChatHandler struct {
-	router     Router
-	bus        bus.Bus
-	engine     *scoring.Engine
-	cbRegistry *circuitbreaker.Registry
-	shadow     *scoring.Orchestrator
-	retryCfg   routing.RetryConfig
-	metrics    *observability.Metrics
-	chains     chain.Registry
+	router         Router
+	bus            bus.Bus
+	engine         *scoring.Engine
+	cbRegistry     *circuitbreaker.Registry
+	shadow         *scoring.Orchestrator
+	retryCfg       routing.RetryConfig
+	metrics        *observability.Metrics
+	chains         chain.Registry
+	retrievalStore *retrieval.Store
 }
 
 // NewChatHandler creates a handler that delegates to router for provider selection.
@@ -210,6 +220,11 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp, err = p.Chat(r.Context(), reasoning.AdjustTokenBudget(&req))
 		result.Model = req.Model
 	}
+
+	if err == nil && h.retrievalStore != nil {
+		resp, err = h.resolveRetrieval(r.Context(), p, &req, resp)
+	}
+
 	latency := time.Since(start)
 	usedModel := req.Model
 	if result.Model != "" {
@@ -257,7 +272,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ev.TokensIn = resp.Usage.PromptTokens
 			ev.TokensOut = resp.Usage.CompletionTokens
 			ev.Response = *resp
-			ev.Cost = cost.ForUsage(usedModel, ev.TokensIn, ev.TokensOut)
+			ev.Cost = cost.ForUsage(usedModel, resp.Usage)
 			ev.FallbackUsed = result.FallbackUsed
 			ev.FallbackFrom = result.FallbackFrom
 		}
@@ -286,6 +301,60 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// resolveRetrieval checks whether the model's response calls
+// retrieval.ToolName — the synthetic tool plugins/compressor injects when it
+// truncates content with reversibility enabled — and if so, resolves it
+// internally: looks the original content back up, replays one extra hop to
+// the same provider with it restored in place of the tool call, and returns
+// that response instead. The caller never sees the intermediate retrieve
+// exchange; from the outside this looks like one ordinary request.
+//
+// Bounded to exactly one extra hop by construction — the second p.Chat
+// call's response is returned as-is, not run back through this function —
+// so a model that keeps calling retrieve can't cause an unbounded loop. If
+// it does ask again on the second hop, that call is simply returned to the
+// caller unresolved, the same as if reversibility weren't enabled at all.
+//
+// Only reachable when plugins/compressor actually injected the tool, which
+// it only does for non-streaming requests (see that package's doc) — so
+// this never needs to coordinate with handleStream.
+func (h *ChatHandler) resolveRetrieval(ctx context.Context, p provider.Provider, req *schema.RequestEnvelope, resp *schema.ResponseEnvelope) (*schema.ResponseEnvelope, error) {
+	if resp == nil || len(resp.Choices) == 0 {
+		return resp, nil
+	}
+	call, ok := retrieval.FindCall(resp.Choices[0].Message.ToolCalls)
+	if !ok {
+		return resp, nil
+	}
+	id, ok := retrieval.ParseArgs(call.Function.Arguments)
+	if !ok {
+		return resp, nil // malformed arguments — pass the unresolved call through rather than guess
+	}
+
+	content, found := h.retrievalStore.Get(ctx, id)
+	if !found {
+		content = "This content is no longer available (expired or evicted). Answer with what you already have."
+	}
+
+	expanded := *req
+	expanded.Messages = append(append([]schema.Message(nil), req.Messages...),
+		resp.Choices[0].Message,
+		schema.Message{Role: "tool", ToolCallID: call.ID, Content: content},
+	)
+
+	final, err := p.Chat(ctx, &expanded)
+	if err != nil {
+		return nil, err
+	}
+	// The caller's usage/cost accounting should reflect the true total cost
+	// of the request, not just the second hop — fold the first hop's usage
+	// (mostly the tool-call turn itself) into the final response.
+	final.Usage.PromptTokens += resp.Usage.PromptTokens
+	final.Usage.CompletionTokens += resp.Usage.CompletionTokens
+	final.Usage.TotalTokens += resp.Usage.TotalTokens
+	return final, nil
+}
+
 func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p provider.Provider, req *schema.RequestEnvelope, autoRouted bool, fallbackChain []routing.Candidate) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -300,13 +369,15 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 
 	writeSSEHeader(w)
 
-	var totalIn, totalOut int
+	var totalIn, totalOut, totalCacheRead, totalCacheCreation int
 	start := time.Now()
 
 	onChunk := func(chunk provider.StreamChunk) error {
 		if chunk.Usage != nil {
 			totalIn = chunk.Usage.PromptTokens
 			totalOut = chunk.Usage.CompletionTokens
+			totalCacheRead = chunk.Usage.CacheReadInputTokens
+			totalCacheCreation = chunk.Usage.CacheCreationInputTokens
 		}
 		if err := writeSSEChunk(w, chunk); err != nil {
 			return err
@@ -376,7 +447,12 @@ func (h *ChatHandler) handleStream(w http.ResponseWriter, r *http.Request, p pro
 		if streamErr != nil {
 			ev.Error = streamErr.Error()
 		} else {
-			ev.Cost = cost.ForUsage(usedModel, totalIn, totalOut)
+			ev.Cost = cost.ForUsage(usedModel, schema.Usage{
+				PromptTokens:             totalIn,
+				CompletionTokens:         totalOut,
+				CacheReadInputTokens:     totalCacheRead,
+				CacheCreationInputTokens: totalCacheCreation,
+			})
 			ev.FallbackUsed = result.FallbackUsed
 			ev.FallbackFrom = result.FallbackFrom
 		}
@@ -431,7 +507,7 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		ev.TokensIn = resp.Usage.PromptTokens
 		ev.TokensOut = resp.Usage.CompletionTokens
 		ev.Response = *resp
-		ev.Cost = cost.ForUsage(shadowModel, ev.TokensIn, ev.TokensOut)
+		ev.Cost = cost.ForUsage(shadowModel, resp.Usage)
 	}
 	_ = h.bus.Publish(ctx, ev)
 }
