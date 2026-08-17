@@ -53,11 +53,11 @@ func TestToWireRequest_MultipleSystemMessagesConcatenated(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	want := "What you know about this user: User's name is Arun\n\nbe concise"
-	if got.System != want {
-		t.Errorf("system: got %q, want %q", got.System, want)
+	if len(got.System) != 1 || got.System[0].Text != want {
+		t.Errorf("system: got %+v, want a single block with text %q", got.System, want)
 	}
 	if len(got.Messages) != 1 {
 		t.Errorf("messages: got %d, want 1 (both system messages must be removed)", len(got.Messages))
