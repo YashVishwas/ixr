@@ -139,7 +139,8 @@ type streamMessageDelta struct {
 
 // toWireRequest converts ixr's canonical envelope to the Anthropic Messages API format.
 // System messages are lifted out of the messages array into the top-level system field,
-// as required by the Anthropic API. Anthropic has no role="tool" — consecutive tool
+// as required by the Anthropic API — multiple system-role messages are concatenated in
+// order, not just the last one kept. Anthropic has no role="tool" — consecutive tool
 // result messages are coalesced into a single role="user" message with one
 // tool_result content block per result, which the API requires.
 func toWireRequest(req *schema.RequestEnvelope) wireRequest {
@@ -166,7 +167,16 @@ func toWireRequest(req *schema.RequestEnvelope) wireRequest {
 		flushResults()
 
 		if m.Role == "system" {
-			system = m.Content
+			// Concatenate rather than overwrite: a request can legitimately
+			// carry more than one system-role message (e.g.
+			// MemoryMiddleware prepends a user-facts system message ahead
+			// of the caller's own one) — overwriting silently dropped every
+			// system message but the last.
+			if system != "" {
+				system += "\n\n" + m.Content
+			} else {
+				system = m.Content
+			}
 			continue
 		}
 

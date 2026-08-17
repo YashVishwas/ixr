@@ -33,6 +33,33 @@ func TestToWireRequest_SystemLifted(t *testing.T) {
 	}
 }
 
+// TestToWireRequest_MultipleSystemMessagesConcatenated is the regression
+// test for a bug found while reviewing brevity's system-message handling: a
+// request can legitimately carry more than one system-role message (e.g.
+// MemoryMiddleware prepends a user-facts system message ahead of the
+// caller's own one) — the loop below used to overwrite `system` on every
+// system-role message, silently dropping every one but the last.
+func TestToWireRequest_MultipleSystemMessagesConcatenated(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "claude-3-5-sonnet-20241022",
+		Messages: []schema.Message{
+			{Role: "system", Content: "What you know about this user: User's name is Arun"},
+			{Role: "system", Content: "be concise"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	got := toWireRequest(req)
+
+	want := "What you know about this user: User's name is Arun\n\nbe concise"
+	if got.System != want {
+		t.Errorf("system: got %q, want %q", got.System, want)
+	}
+	if len(got.Messages) != 1 {
+		t.Errorf("messages: got %d, want 1 (both system messages must be removed)", len(got.Messages))
+	}
+}
+
 func TestToWireRequest_NoSystem(t *testing.T) {
 	req := &schema.RequestEnvelope{
 		Model:    "claude-3-5-sonnet-20241022",
