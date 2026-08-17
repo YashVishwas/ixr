@@ -432,15 +432,30 @@ func Start(opts ...Option) error {
 		slog.Info("pprof debug server listening", "addr", addr)
 	}
 
+	// --- Request body size cap ---
+	// Wraps the whole mux (not each handler individually) so a new
+	// endpoint added later is covered automatically. Every current
+	// JSON-decoding handler/middleware reads r.Body directly with no
+	// limit of its own — several re-decode/re-marshal the same body more
+	// than once as it passes through the interceptor/memory/session
+	// chain, multiplying the cost of one oversized request. Defaults on
+	// (unlike most opt-in features here) since this is a resource-
+	// exhaustion guard, not a behavior change a caller would notice
+	// until they send something unreasonably large; <=0 disables it.
+	maxBodyBytes := int64(envInt("IXR_MAX_REQUEST_BODY_BYTES", 10<<20)) // 10MB
+	bodyLimitMW := ingress.NewBodyLimitMiddleware(maxBodyBytes)
+	limitedMux := http.NewServeMux()
+	limitedMux.Handle("/", bodyLimitMW.Handler(mux))
+
 	// --- Server (TLS or plain) ---
 	if fileCfg != nil && fileCfg.Server.TLSCert != "" {
-		srv, tlsErr := ingress.NewServerTLS(port, mux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
+		srv, tlsErr := ingress.NewServerTLS(port, limitedMux, fileCfg.Server.TLSCert, fileCfg.Server.TLSKey, fileCfg.Server.ClientCA)
 		if tlsErr != nil {
 			return fmt.Errorf("TLS setup: %w", tlsErr)
 		}
 		return srv.Run(ctx)
 	}
-	return ingress.NewServer(port, mux).Run(ctx)
+	return ingress.NewServer(port, limitedMux).Run(ctx)
 }
 
 func envInt(key string, def int) int {
