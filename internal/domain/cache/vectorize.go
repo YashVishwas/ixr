@@ -2,10 +2,14 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"strings"
 	"unicode"
+
+	"github.com/YashVishwas/ixr/pkg/provider"
+	"github.com/YashVishwas/ixr/pkg/schema"
 )
 
 // vecDim is the fixed dimension of word-hashed vectors.
@@ -38,6 +42,33 @@ func tokenize(text string) []string {
 	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
+}
+
+// ProviderEmbedder adapts a provider.Embedder (e.g. the OpenAI adapter, which
+// calls the real /v1/embeddings endpoint) to the cache.Embedder interface.
+//
+// It produces a different vector space (dimension and values) than
+// WordVectorizer, so it must never be compared against WordVectorizer output
+// via cosineSimilarity — mismatched dimensions silently score 0 (see
+// TestCosineSimilarity_DimMismatch), which would make every entry stored
+// through a mismatched pairing permanently unmatchable dead weight. Use it
+// with a SemanticBackend that only ever stores and queries vectors produced
+// by this same ProviderEmbedder (see SemanticCache.WithQualityTier).
+type ProviderEmbedder struct {
+	Provider provider.Embedder
+	Model    string
+}
+
+// Embed calls the wrapped provider's embeddings endpoint for a single input.
+func (p ProviderEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	resp, err := p.Provider.Embed(ctx, &schema.EmbeddingRequest{Model: p.Model, Input: text})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("cache: provider returned no embedding data")
+	}
+	return resp.Data[0].Embedding, nil
 }
 
 func bucketOf(token string) uint32 {
