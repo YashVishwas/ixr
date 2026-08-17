@@ -61,6 +61,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried. Observability only — does not change routing behavior.
 
 ### Fixed
+- `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
+  and `availableCatalog` without importing/defining them, and called
+  `ingress.NewMemoryHandler` code that had been silently dropped. Root
+  cause, repeated across at least five separate PRs (`feat/request-compression-transformer`,
+  `feat/auto-routing-provider-filter`, `feat/memory-management-api`,
+  `feat/durable-retrieval-store`, `feat/code-comment-stripper`): each
+  branch's own "merge main into this branch" step auto-resolved cleanly
+  (no conflict markers) but silently discarded that branch's own code
+  changes to `pkg/ixr/ixr.go`, `internal/domain/retrieval/store.go`, and
+  `plugins/compressor/plugin.go` — because an unrelated main commit
+  inserted content at the exact same location, git's merge picked one
+  side without flagging a conflict. None of this was caught before
+  merging because the missing wiring doesn't fail a build on its own
+  (dead imports would vet-fail, but here call sites referenced symbols
+  whose *definitions* were the part that got dropped, which only fails
+  once every dependent commit lands together). Restored: the `compressor`
+  import and its interceptor wiring, `availableCatalog` and its scoring-
+  engine call site, the `GET`/`DELETE /v1/memory` handlers, the
+  Redis-backed multi-instance `retrieval.Backend` (`internal/domain/retrieval/store.go`,
+  `IXR_RETRIEVAL_REDIS_ADDR`), and `compress()`'s comment-stripping
+  integration (`plugins/compressor/plugin.go`). `go build`, `go vet`,
+  `go test -race`, and `make check-deps` all clean after.
 - `go vet ./...` was failing on `main`: `TestToWireRequest_MultipleSystemMessagesConcatenated`
   (`internal/adapters/providers/anthropic/translate_test.go`) predated two
   later signature/type changes — `toWireRequest` gained a `historyLen int`

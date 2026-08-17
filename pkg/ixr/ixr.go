@@ -24,6 +24,7 @@ import (
 	"github.com/YashVishwas/ixr/plugins/banditreward"
 	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
+	"github.com/YashVishwas/ixr/plugins/compressor"
 	feedbackplugin "github.com/YashVishwas/ixr/plugins/feedback"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
@@ -283,8 +284,23 @@ func Start(opts ...Option) error {
 	// store, so both sides need the one instance.
 	var retrievalStore *retrieval.Store
 	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" && os.Getenv("IXR_COMPRESS_REVERSIBLE") == "true" {
-		retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
-		retrievalStore = retrieval.NewStore(retrievalStoreSize)
+		// IXR_RETRIEVAL_REDIS_ADDR opts into a shared backend so a
+		// retrieval ID minted by one ixr replica can be resolved by
+		// another sitting behind the same load balancer — the default
+		// in-memory backend is single-instance only (see
+		// internal/domain/retrieval.Backend's doc comment). Unset means
+		// exactly the pre-feature in-memory behavior; never mandatory.
+		if redisAddr := os.Getenv("IXR_RETRIEVAL_REDIS_ADDR"); redisAddr != "" {
+			redisClient := redis.NewClient(&redis.Options{
+				Addr:     redisAddr,
+				Password: os.Getenv("IXR_RETRIEVAL_REDIS_PASSWORD"),
+				DB:       envInt("IXR_RETRIEVAL_REDIS_DB", 0),
+			})
+			retrievalStore = retrieval.NewStoreWithBackend(retrievalstore.New(redisClient))
+		} else {
+			retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
+			retrievalStore = retrieval.NewStore(retrievalStoreSize)
+		}
 	}
 
 	// --- Chat handler ---
@@ -447,6 +463,16 @@ func Start(opts ...Option) error {
 	imagesHandler := ingress.NewImagesHandler(router)
 	mux.Handle("POST /v1/images/generations", obs(authMW.Handler(imagesHandler)))
 
+	// Memory management — lets a caller inspect/correct what's been
+	// remembered about them (Future Work item; also the practical answer
+	// to RFC Open Question 8's lack of a staleness-correction mechanism).
+	// Always registered, same as MemoryMiddleware's injection below: the
+	// store is harmless to read/delete from even when IXR_MEMORY=false and
+	// nothing is being extracted into it.
+	memoryHandler := ingress.NewMemoryHandler(memoryStore)
+	mux.Handle("GET /v1/memory", obs(authMW.Handler(memoryHandler)))
+	mux.Handle("DELETE /v1/memory/{id}", obs(authMW.Handler(memoryHandler)))
+
 	// Feedback (RFC Gap 12 quality signal) — only registered when
 	// auto-bandit is enabled; feedbackStore is nil otherwise and there's
 	// nothing meaningful for this endpoint to do.
@@ -554,6 +580,20 @@ func envString(key, def string) string {
 }
 
 // buildRouter constructs the prefix-based model→provider dispatch function.
+// availableCatalog filters cat down to entries whose provider resolves via
+// resolve (buildRouter's dispatch function) — see the comment where this is
+// called for why model:"auto" must never consider a candidate this
+// deployment can't actually serve.
+func availableCatalog(cat []routing.ModelCard, resolve ingress.Router) []routing.ModelCard {
+	out := make([]routing.ModelCard, 0, len(cat))
+	for _, m := range cat {
+		if _, err := resolve(m.ID); err == nil {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func buildRouter(registry map[string]provider.Provider) ingress.Router {
 	return func(model string) (provider.Provider, error) {
 		m := strings.ToLower(model)
