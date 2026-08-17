@@ -153,9 +153,10 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 		text, calls := splitParts(c0.Content.Parts)
 
 		u := schema.Usage{
-			PromptTokens:     wr.UsageMetadata.PromptTokenCount,
-			CompletionTokens: wr.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      wr.UsageMetadata.TotalTokenCount,
+			PromptTokens:         wr.UsageMetadata.PromptTokenCount,
+			CompletionTokens:     wr.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:          wr.UsageMetadata.TotalTokenCount,
+			CacheReadInputTokens: wr.UsageMetadata.CachedContentTokenCount,
 		}
 		var usagePtr *schema.Usage
 		if wr.UsageMetadata.TotalTokenCount > 0 {

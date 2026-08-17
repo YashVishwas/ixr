@@ -484,6 +484,50 @@ func TestChatHandler_ComputesCostAndPropagatesIdentity(t *testing.T) {
 	}
 }
 
+// TestChatHandler_CacheReadDiscountReflectedInPublishedCost is the
+// end-to-end regression test for the cache-discount cost accounting gap:
+// a response reporting CacheReadInputTokens must produce a discounted cost
+// on the actual CallEvent published to the bus, not just in the cost
+// package's own unit tests.
+func TestChatHandler_CacheReadDiscountReflectedInPublishedCost(t *testing.T) {
+	published := make(chan *schema.CallEvent, 1)
+	fakeBus := &captureBus{ch: published}
+
+	p := &stubProvider{
+		name: "anthropic",
+		resp: &schema.ResponseEnvelope{
+			ID:      "r1",
+			Model:   "claude-sonnet-4-6",
+			Choices: []schema.Choice{{}},
+			Usage: schema.Usage{
+				PromptTokens:         1_000_000,
+				CompletionTokens:     0,
+				CacheReadInputTokens: 1_000_000, // the entire prompt was a cache hit
+			},
+		},
+	}
+	h := NewChatHandler(fixedRouter(p), fakeBus)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewReader([]byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`)))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	ev := readEvent(t, published)
+	// $3/1M input rate * 10% cache-read multiplier = $0.30, not the $3.00
+	// a naive full-price calculation would produce.
+	want := 0.30
+	if ev.Cost.InputUSD < want-0.0001 || ev.Cost.InputUSD > want+0.0001 {
+		t.Fatalf("published cost not discounted for cache read: got %.4f, want %.4f", ev.Cost.InputUSD, want)
+	}
+}
+
 func TestChatHandler_UnpricedModelYieldsZeroCost(t *testing.T) {
 	published := make(chan *schema.CallEvent, 1)
 	fakeBus := &captureBus{ch: published}

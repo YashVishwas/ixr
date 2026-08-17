@@ -1,7 +1,16 @@
-.PHONY: build test vet lint clean check-deps
+.PHONY: build test vet lint clean check-deps eval
 
 build:
 	go build ./...
+
+# runs the golden question set (eval/golden.yaml) against a running ixr
+# instance; override MODELS/BASE_URL/QUESTIONS as needed, e.g.:
+#   make eval MODELS=gpt-4o,claude-sonnet-4-6,auto BASE_URL=http://localhost:7000/v1
+MODELS ?= auto
+BASE_URL ?= http://localhost:7000/v1
+QUESTIONS ?= eval/golden.yaml
+eval:
+	go run ./cmd/ixr-eval -base-url $(BASE_URL) -questions $(QUESTIONS) -models $(MODELS)
 
 test:
 	go test -race ./...

@@ -71,6 +71,79 @@ func TestFromWireResponse_ToolCalls(t *testing.T) {
 	}
 }
 
+// TestFromWireResponse_DeepSeekCacheHitTokens confirms DeepSeek's
+// non-standard prompt_cache_hit_tokens field reaches
+// schema.Usage.CacheReadInputTokens, which is what internal/domain/cost
+// prices at a discount.
+func TestFromWireResponse_DeepSeekCacheHitTokens(t *testing.T) {
+	wr := &wireResponse{
+		ID:    "chatcmpl-abc",
+		Model: "deepseek-v3-0324",
+		Usage: wireUsage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050, PromptCacheHitTokens: 800},
+	}
+
+	got := fromWireResponse(wr)
+
+	if got.Usage.CacheReadInputTokens != 800 {
+		t.Errorf("CacheReadInputTokens: got %d, want 800", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestFromWireResponse_OpenAIStandardCachedTokens covers the other shape:
+// prompt_tokens_details.cached_tokens, used by OpenAI itself and providers
+// that mirror its wire format.
+func TestFromWireResponse_OpenAIStandardCachedTokens(t *testing.T) {
+	wr := &wireResponse{
+		ID:    "chatcmpl-abc",
+		Model: "gpt-4o",
+		Usage: wireUsage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050, PromptTokensDetails: &wireTokenDetails{CachedTokens: 600}},
+	}
+
+	got := fromWireResponse(wr)
+
+	if got.Usage.CacheReadInputTokens != 600 {
+		t.Errorf("CacheReadInputTokens: got %d, want 600", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestFromWireResponse_NoCacheFields_ZeroCacheReadTokens confirms a
+// provider that reports neither shape (the common case — most
+// OpenAI-compatible providers don't do prompt caching at all) doesn't pick
+// up a stray nonzero value.
+func TestFromWireResponse_NoCacheFields_ZeroCacheReadTokens(t *testing.T) {
+	wr := &wireResponse{
+		ID:    "chatcmpl-abc",
+		Model: "llama-3.3-70b-versatile",
+		Usage: wireUsage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050},
+	}
+
+	got := fromWireResponse(wr)
+
+	if got.Usage.CacheReadInputTokens != 0 {
+		t.Errorf("CacheReadInputTokens: got %d, want 0", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestDeltaToChunk_CacheHitTokens confirms the streaming path picks up
+// cache-hit tokens the same way the non-streaming path does — usage
+// normally arrives on the final SSE chunk, after all content deltas.
+func TestDeltaToChunk_CacheHitTokens(t *testing.T) {
+	d := &wireDeltaResponse{
+		ID:    "chatcmpl-abc",
+		Model: "deepseek-v3-0324",
+		Usage: &wireDeltaUsage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050, PromptCacheHitTokens: 800},
+	}
+
+	chunk := deltaToChunk(d)
+
+	if chunk.Usage == nil {
+		t.Fatal("expected non-nil Usage")
+	}
+	if chunk.Usage.CacheReadInputTokens != 800 {
+		t.Errorf("CacheReadInputTokens: got %d, want 800", chunk.Usage.CacheReadInputTokens)
+	}
+}
+
 func TestToolCallAccumulator_ReassemblesFragmentedArguments(t *testing.T) {
 	acc := newToolCallAccumulator()
 	acc.add([]wireDeltaToolCall{{Index: 0, ID: "call_1", Type: "function"}})
