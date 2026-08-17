@@ -64,7 +64,11 @@ func TestToGenWireRequest_ToolsAndFunctionCalls(t *testing.T) {
 // valid, text-only request (using the already-flattened m.Content) rather
 // than erroring or sending a malformed body — see the slog.Warn next to
 // this loop in translate.go for the operator-visibility half of the fix.
-func TestToGenWireRequest_ImageContentDroppedNotErroredOrCorrupted(t *testing.T) {
+// TestToGenWireRequest_ImageContentTranslated is the regression test for
+// RFC Gap 10's remaining half: this adapter used to silently drop image
+// content (m.Parts was never translated, only the already-flattened text
+// survived). Now it must produce a real inline-base64 image part.
+func TestToGenWireRequest_ImageContentTranslated(t *testing.T) {
 	req := &schema.RequestEnvelope{
 		Model: "gemini-2.0-flash",
 		Messages: []schema.Message{
@@ -73,7 +77,7 @@ func TestToGenWireRequest_ImageContentDroppedNotErroredOrCorrupted(t *testing.T)
 				Content: "what is in this image?", // flattened by pkg/schema's UnmarshalJSON
 				Parts: []schema.ContentPart{
 					{Type: "text", Text: "what is in this image?"},
-					{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "data:image/png;base64,AAAA"}},
+					{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "data:image/png;base64,AAAABBBB"}},
 				},
 			},
 		},
@@ -84,12 +88,43 @@ func TestToGenWireRequest_ImageContentDroppedNotErroredOrCorrupted(t *testing.T)
 	if len(got.Contents) != 1 {
 		t.Fatalf("contents: got %d, want 1", len(got.Contents))
 	}
-	if len(got.Contents[0].Parts) != 1 || got.Contents[0].Parts[0].Text != "what is in this image?" {
-		t.Errorf("expected the flattened text to be forwarded, got %+v", got.Contents[0].Parts)
+	parts := got.Contents[0].Parts
+	if len(parts) != 2 {
+		t.Fatalf("parts: got %d, want 2 (text + image)", len(parts))
 	}
-	// No panic, no error return value to check (toGenWireRequest doesn't
-	// return one) — reaching here at all is the assertion that a
-	// multimodal message doesn't corrupt or crash the translation.
+	if parts[0].Text != "what is in this image?" {
+		t.Errorf("text part: got %+v", parts[0])
+	}
+	if parts[1].InlineData == nil {
+		t.Fatalf("image part: got %+v, want InlineData set", parts[1])
+	}
+	if parts[1].InlineData.MimeType != "image/png" || parts[1].InlineData.Data != "AAAABBBB" {
+		t.Errorf("inline data: got %+v", parts[1].InlineData)
+	}
+}
+
+// TestToGenWireRequest_ImageHTTPURLPassedThrough confirms a non-data:
+// image URL is sent as a fileData part (Gemini fetches it itself),
+// matching the Anthropic/Bedrock adapters' equivalent "url"-type source.
+func TestToGenWireRequest_ImageHTTPURLPassedThrough(t *testing.T) {
+	req := &schema.RequestEnvelope{
+		Model: "gemini-2.0-flash",
+		Messages: []schema.Message{
+			{Role: "user", Parts: []schema.ContentPart{
+				{Type: "image_url", ImageURL: &schema.ImageURLPart{URL: "https://example.com/cat.png"}},
+			}},
+		},
+	}
+
+	got := toGenWireRequest(req)
+
+	parts := got.Contents[0].Parts
+	if len(parts) != 1 || parts[0].FileData == nil {
+		t.Fatalf("image part: got %+v", parts)
+	}
+	if parts[0].FileData.FileURI != "https://example.com/cat.png" {
+		t.Errorf("file data: got %+v", parts[0].FileData)
+	}
 }
 
 func TestFromGenWireResponse_FunctionCallOnly(t *testing.T) {
@@ -118,5 +153,53 @@ func TestFromGenWireResponse_FunctionCallOnly(t *testing.T) {
 	}
 	if got.Choices[0].FinishReason != "tool_calls" {
 		t.Errorf("finish_reason: got %q, want tool_calls (overridden despite raw STOP)", got.Choices[0].FinishReason)
+	}
+}
+
+// TestFromGenWireResponse_CachedContentTokens confirms Gemini's context-
+// caching usage field (populated for both implicit and explicit caching)
+// reaches schema.Usage.CacheReadInputTokens, which is what
+// internal/domain/cost prices at a discount.
+func TestFromGenWireResponse_CachedContentTokens(t *testing.T) {
+	wr := &genWireResponse{
+		Candidates: []genCandidate{{
+			Content:      genContent{Role: "model", Parts: []genPart{{Text: "hi"}}},
+			FinishReason: "STOP",
+		}},
+		UsageMetadata: genUsage{
+			PromptTokenCount:        1000,
+			CandidatesTokenCount:    50,
+			TotalTokenCount:         1050,
+			CachedContentTokenCount: 700,
+		},
+	}
+
+	got, err := fromGenWireResponse("gemini-3.1-pro", wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Usage.CacheReadInputTokens != 700 {
+		t.Errorf("CacheReadInputTokens: got %d, want 700", got.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestFromGenWireResponse_NoCachedContent_ZeroCacheReadTokens confirms a
+// response with no context caching involved doesn't pick up a stray
+// nonzero value.
+func TestFromGenWireResponse_NoCachedContent_ZeroCacheReadTokens(t *testing.T) {
+	wr := &genWireResponse{
+		Candidates: []genCandidate{{
+			Content:      genContent{Role: "model", Parts: []genPart{{Text: "hi"}}},
+			FinishReason: "STOP",
+		}},
+		UsageMetadata: genUsage{PromptTokenCount: 1000, CandidatesTokenCount: 50, TotalTokenCount: 1050},
+	}
+
+	got, err := fromGenWireResponse("gemini-3.1-pro", wr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Usage.CacheReadInputTokens != 0 {
+		t.Errorf("CacheReadInputTokens: got %d, want 0", got.Usage.CacheReadInputTokens)
 	}
 }

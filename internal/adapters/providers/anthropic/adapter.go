@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/pkg/provider"
 	"github.com/YashVishwas/ixr/pkg/schema"
 )
@@ -49,7 +50,8 @@ func (a *Adapter) setHeaders(r *http.Request) {
 
 // Chat sends req to the Anthropic Messages API and returns a normalised response.
 func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schema.ResponseEnvelope, error) {
-	body, err := json.Marshal(toWireRequest(req))
+	historyLen, _ := cache.HistoryLenFromContext(ctx)
+	body, err := json.Marshal(toWireRequest(req, historyLen))
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: marshal request: %w", err)
 	}
@@ -90,7 +92,8 @@ func (a *Adapter) Chat(ctx context.Context, req *schema.RequestEnvelope) (*schem
 // Stream sends req with stream=true using Anthropic's multi-event SSE format.
 // Sequence: message_start → content_block_delta* → message_delta → message_stop.
 func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn func(provider.StreamChunk) error) error {
-	wr := toWireRequest(req).withStream()
+	historyLen, _ := cache.HistoryLenFromContext(ctx)
+	wr := toWireRequest(req, historyLen).withStream()
 
 	body, err := json.Marshal(wr)
 	if err != nil {
@@ -115,7 +118,7 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 	}
 
 	var msgID, model string
-	var inputTok int
+	var inputTok, cacheReadTok, cacheCreationTok int
 	toolCalls := newStreamToolCallAccumulator()
 
 	scanner := bufio.NewScanner(httpResp.Body)
@@ -138,6 +141,8 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 				msgID = ms.Message.ID
 				model = ms.Message.Model
 				inputTok = ms.Message.Usage.InputTokens
+				cacheReadTok = ms.Message.Usage.CacheReadInputTokens
+				cacheCreationTok = ms.Message.Usage.CacheCreationInputTokens
 			}
 
 		case "content_block_start":
@@ -173,10 +178,13 @@ func (a *Adapter) Stream(ctx context.Context, req *schema.RequestEnvelope, fn fu
 			if err := json.Unmarshal([]byte(data), &md); err != nil {
 				continue
 			}
+			promptTokens := inputTok + cacheReadTok + cacheCreationTok
 			u := schema.Usage{
-				PromptTokens:     inputTok,
-				CompletionTokens: md.Usage.OutputTokens,
-				TotalTokens:      inputTok + md.Usage.OutputTokens,
+				PromptTokens:             promptTokens,
+				CompletionTokens:         md.Usage.OutputTokens,
+				TotalTokens:              promptTokens + md.Usage.OutputTokens,
+				CacheReadInputTokens:     cacheReadTok,
+				CacheCreationInputTokens: cacheCreationTok,
 			}
 			chunk := provider.StreamChunk{
 				ID:           msgID,

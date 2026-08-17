@@ -22,7 +22,9 @@ import (
 
 	auditlog "github.com/YashVishwas/ixr/plugins/audit-log"
 	"github.com/YashVishwas/ixr/plugins/banditreward"
+	"github.com/YashVishwas/ixr/plugins/brevity"
 	budgetplugin "github.com/YashVishwas/ixr/plugins/budget"
+	feedbackplugin "github.com/YashVishwas/ixr/plugins/feedback"
 	memoryplugin "github.com/YashVishwas/ixr/plugins/memory"
 	"github.com/YashVishwas/ixr/plugins/telemetry"
 
@@ -49,6 +51,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/cache"
 	"github.com/YashVishwas/ixr/internal/domain/chain"
 	"github.com/YashVishwas/ixr/internal/domain/circuitbreaker"
+	domainfeedback "github.com/YashVishwas/ixr/internal/domain/feedback"
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
@@ -190,9 +193,20 @@ func Start(opts ...Option) error {
 	// deployments see no behavior change) unless explicitly enabled. Shares
 	// the same bandit instance as shadow routing above, so exploration and
 	// reward from both paths reinforce one set of arm statistics.
+	var feedbackStore *domainfeedback.Store
 	if os.Getenv("IXR_AUTO_BANDIT") == "true" {
 		scoringEngine.SetBandit(bandit)
 		mgr.Register(banditreward.New(bandit))
+
+		// Caller feedback (POST /v1/feedback) strengthens the same
+		// bandit's quality signal beyond banditreward's coarse, free
+		// FinishReason proxy — a real human rating, when a caller
+		// chooses to submit one. Indexing (feedbackplugin) and the HTTP
+		// handler (registered below, alongside the other non-chat
+		// endpoints) share one Store instance. Meaningless without
+		// auto-routing enabled, so it's gated the same way.
+		feedbackStore = domainfeedback.NewStore(envInt("IXR_FEEDBACK_STORE_SIZE", 10_000), time.Duration(envInt("IXR_FEEDBACK_TTL_SEC", 3600))*time.Second)
+		mgr.Register(feedbackplugin.New(feedbackStore))
 	}
 
 	// --- Semantic cache ---
@@ -205,7 +219,28 @@ func Start(opts ...Option) error {
 		threshold := float32(envFloat("IXR_CACHE_THRESHOLD", 0.92))
 		semanticBackend := cache.NewPersistentSemanticBackend(cacheSize, os.Getenv("IXR_CACHE_DIR"))
 		defer semanticBackend.Close()
-		responseCache = cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+		semanticCache := cache.NewSemanticCache(exactCache, semanticBackend, cache.WordVectorizer{}, threshold)
+
+		// Quality tier (opt-in): catches paraphrase-level matches the fast
+		// WordVectorizer token-overlap approximation misses (e.g. "summarize
+		// this" vs "give me a summary"), by embedding through a real
+		// provider on Store (async, off the request path) and consulting it
+		// on Lookup only as a fallback after the fast tier misses, bounded by
+		// IXR_CACHE_QUALITY_TIMEOUT_MS rather than the fast path's fixed 5ms.
+		// Requires an OpenAI provider to already be configured — this reuses
+		// that adapter rather than standing up a separate credential path.
+		if os.Getenv("IXR_CACHE_QUALITY_EMBEDDER") == "true" {
+			if embedder, ok := registry["openai"].(provider.Embedder); ok {
+				model := envString("IXR_CACHE_QUALITY_MODEL", "text-embedding-3-small")
+				qualityBackend := cache.NewMemorySemanticBackend(cacheSize)
+				timeout := time.Duration(envInt("IXR_CACHE_QUALITY_TIMEOUT_MS", 150)) * time.Millisecond
+				semanticCache.WithQualityTier(cache.ProviderEmbedder{Provider: embedder, Model: model}, qualityBackend, timeout)
+			} else {
+				slog.Warn("IXR_CACHE_QUALITY_EMBEDDER=true but no OpenAI provider is configured; quality tier disabled")
+			}
+		}
+
+		responseCache = semanticCache
 	}
 
 	// --- Model chains (RFC Gap 11: sequential; Gap 11 fusion extension:
@@ -292,6 +327,15 @@ func Start(opts ...Option) error {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
 	}
 
+	// Output-side brevity steering (opt-in): appends a terseness instruction
+	// to the system message so the model favors fragments over prose,
+	// trimming output tokens — the counterpart to input-side compression.
+	// Whether it actually reduces tokens is model behavior, not something
+	// this wiring can guarantee; see plugins/brevity's package doc.
+	if os.Getenv("IXR_TERSE_OUTPUT") == "true" {
+		interceptors = append(interceptors, brevity.New(os.Getenv("IXR_TERSE_INSTRUCTION")))
+	}
+
 	// --- Session store (optional) ---
 	// Config file takes precedence; env vars are the fallback.
 	sessionTTLSec := envInt("IXR_SESSION_TTL_SEC", 0)
@@ -324,15 +368,23 @@ func Start(opts ...Option) error {
 		middleChain = ingress.NewSessionMiddleware(store, cacheLayer)
 	}
 
-	// Chat completions: auth → rate limit → interceptors → memory → session → cache → chat
+	// Admission control (RFC Gap 13, opt-in): caps aggregate in-flight
+	// requests regardless of which model is requested — complementary to
+	// per-model circuit breaking, not redundant with it. Checked before
+	// rate limiting (which does per-identity accounting work of its own)
+	// since there's no point doing that work if the system is already
+	// globally saturated. 0/unset disables it entirely.
+	admissionMW := ingress.NewAdmissionMiddleware(envInt("IXR_MAX_INFLIGHT", 0))
+
+	// Chat completions: auth → admission control → rate limit → interceptors → memory → session → cache → chat
 	// Memory sits outside session (per MemoryMiddleware's doc comment) so the
 	// memory system message is in place before session history is appended.
 	memTopK := envInt("IXR_MEMORY_TOP_K", 5)
-	chatChain := authMW.Handler(rateMW.Handler(
+	chatChain := authMW.Handler(admissionMW.Handler(rateMW.Handler(
 		ingress.NewInterceptorMiddleware(interceptors,
 			ingress.NewMemoryMiddleware(memoryStore, memTopK, middleChain),
 		).WithBus(memBus),
-	))
+	)))
 	mux.Handle("POST /v1/chat/completions", obs(chatChain))
 
 	// Non-chat endpoints: auth → handler (no caching)
@@ -341,6 +393,14 @@ func Start(opts ...Option) error {
 
 	imagesHandler := ingress.NewImagesHandler(router)
 	mux.Handle("POST /v1/images/generations", obs(authMW.Handler(imagesHandler)))
+
+	// Feedback (RFC Gap 12 quality signal) — only registered when
+	// auto-bandit is enabled; feedbackStore is nil otherwise and there's
+	// nothing meaningful for this endpoint to do.
+	if feedbackStore != nil {
+		feedbackHandler := ingress.NewFeedbackHandler(feedbackStore, bandit)
+		mux.Handle("POST /v1/feedback", obs(authMW.Handler(feedbackHandler)))
+	}
 
 	// Schema and metrics are unauthenticated
 	mux.Handle("GET /v1/schema", ingress.NewSchemaHandler())
@@ -418,18 +478,11 @@ func envFloat(key string, def float64) float64 {
 	return def
 }
 
-// availableCatalog filters cat down to entries whose provider resolves via
-// resolve (buildRouter's dispatch function) — see the comment where this is
-// called for why model:"auto" must never consider a candidate this
-// deployment can't actually serve.
-func availableCatalog(cat []routing.ModelCard, resolve ingress.Router) []routing.ModelCard {
-	out := make([]routing.ModelCard, 0, len(cat))
-	for _, m := range cat {
-		if _, err := resolve(m.ID); err == nil {
-			out = append(out, m)
-		}
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return out
+	return def
 }
 
 // buildRouter constructs the prefix-based model→provider dispatch function.

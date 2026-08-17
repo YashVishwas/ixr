@@ -59,6 +59,30 @@ type wireUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// PromptTokensDetails.CachedTokens is the field name OpenAI itself (and
+	// a growing number of OpenAI-compatible providers) uses to report
+	// prompt-cache hits.
+	PromptTokensDetails *wireTokenDetails `json:"prompt_tokens_details,omitempty"`
+	// PromptCacheHitTokens is DeepSeek's own field name for the same
+	// concept (its disk-backed KV cache) — a different provider, a
+	// different shape, same meaning. See cachedTokens below, which reads
+	// whichever of the two a given provider actually sent.
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
+}
+
+type wireTokenDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// cachedTokens returns whichever cache-hit field a provider populated.
+// Providers only ever send one of the two shapes, never both, so there's
+// no real ambiguity to resolve — this just avoids two call sites needing
+// to know both field names exist.
+func (u wireUsage) cachedTokens() int {
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return u.PromptCacheHitTokens
 }
 
 // wireDeltaResponse is the JSON shape of each SSE chunk from OpenAI-compat APIs.
@@ -98,9 +122,18 @@ type wireDeltaToolFunction struct {
 }
 
 type wireDeltaUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens         int               `json:"prompt_tokens"`
+	CompletionTokens     int               `json:"completion_tokens"`
+	TotalTokens          int               `json:"total_tokens"`
+	PromptTokensDetails  *wireTokenDetails `json:"prompt_tokens_details,omitempty"`
+	PromptCacheHitTokens int               `json:"prompt_cache_hit_tokens,omitempty"`
+}
+
+func (u wireDeltaUsage) cachedTokens() int {
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return u.PromptCacheHitTokens
 }
 
 func toWireRequest(req *schema.RequestEnvelope) wireRequest {
@@ -143,9 +176,10 @@ func fromWireResponse(wr *wireResponse) *schema.ResponseEnvelope {
 		Model:   wr.Model,
 		Choices: choices,
 		Usage: schema.Usage{
-			PromptTokens:     wr.Usage.PromptTokens,
-			CompletionTokens: wr.Usage.CompletionTokens,
-			TotalTokens:      wr.Usage.TotalTokens,
+			PromptTokens:         wr.Usage.PromptTokens,
+			CompletionTokens:     wr.Usage.CompletionTokens,
+			TotalTokens:          wr.Usage.TotalTokens,
+			CacheReadInputTokens: wr.Usage.cachedTokens(),
 		},
 	}
 }
