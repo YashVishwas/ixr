@@ -160,9 +160,10 @@ func deltaToChunk(d *wireDeltaResponse) provider.StreamChunk {
 	}
 	if d.Usage != nil {
 		u := schema.Usage{
-			PromptTokens:     d.Usage.PromptTokens,
-			CompletionTokens: d.Usage.CompletionTokens,
-			TotalTokens:      d.Usage.TotalTokens,
+			PromptTokens:         d.Usage.PromptTokens,
+			CompletionTokens:     d.Usage.CompletionTokens,
+			TotalTokens:          d.Usage.TotalTokens,
+			CacheReadInputTokens: d.Usage.cachedTokens(),
 		}
 		chunk.Usage = &u
 	}

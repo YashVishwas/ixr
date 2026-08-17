@@ -53,7 +53,7 @@ func TestToWireRequest_MultipleSystemMessagesConcatenated(t *testing.T) {
 		},
 	}
 
-	got := toWireRequest(req)
+	got := toWireRequest(req, 0)
 
 	want := "What you know about this user: User's name is Arun\n\nbe concise"
 	if len(got.System) != 1 || got.System[0].Text != want {
