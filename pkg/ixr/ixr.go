@@ -55,6 +55,7 @@ import (
 	"github.com/YashVishwas/ixr/internal/domain/identity"
 	"github.com/YashVishwas/ixr/internal/domain/memory"
 	"github.com/YashVishwas/ixr/internal/domain/policy"
+	"github.com/YashVishwas/ixr/internal/domain/retrieval"
 	"github.com/YashVishwas/ixr/internal/domain/routing"
 	"github.com/YashVishwas/ixr/internal/domain/scoring"
 	"github.com/YashVishwas/ixr/internal/domain/session"
@@ -240,6 +241,17 @@ func Start(opts ...Option) error {
 		return fmt.Errorf("chains config: %w", err)
 	}
 
+	// --- Reversible compression store (optional) ---
+	// Constructed before the chat handler because WithRetrieval is a
+	// construction-time option — the compressor (wired further below,
+	// alongside the rest of the interceptor chain) writes into the same
+	// store, so both sides need the one instance.
+	var retrievalStore *retrieval.Store
+	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" && os.Getenv("IXR_COMPRESS_REVERSIBLE") == "true" {
+		retrievalStoreSize := envInt("IXR_COMPRESS_RETRIEVAL_STORE_SIZE", 1000)
+		retrievalStore = retrieval.NewStore(retrievalStoreSize)
+	}
+
 	// --- Chat handler ---
 	chatHandler := ingress.NewChatHandler(
 		router,
@@ -249,6 +261,7 @@ func Start(opts ...Option) error {
 		ingress.WithShadow(shadowOrch),
 		ingress.WithMetrics(metrics),
 		ingress.WithChains(chainRegistry),
+		ingress.WithRetrieval(retrievalStore),
 	)
 
 	// --- Rate limiter ---
@@ -308,6 +321,28 @@ func Start(opts ...Option) error {
 	mgr.Register(budgetPlugin) // accumulates spend post-call
 	if len(budgetLimits) > 0 {
 		interceptors = append(interceptors, budgetPlugin) // gates pre-call
+	}
+
+	// Request compression (opt-in): shrinks oversized tool-result/history
+	// content before routing, caching, or the provider ever see it.
+	// guardrail.RequestInterceptor already runs pre-cache/pre-routing and
+	// InterceptorMiddleware already re-marshals a mutated req back into the
+	// body, so this reuses that existing extension point rather than adding
+	// a new one — see plugins/compressor's package doc for why.
+	//
+	// Reversible mode (IXR_COMPRESS_REVERSIBLE=true) additionally stores
+	// truncated originals in retrievalStore (constructed above, before the
+	// chat handler) — see plugins/compressor's package doc and
+	// internal/domain/retrieval for how the model can ask for the full
+	// content back rather than lose it.
+	if os.Getenv("IXR_COMPRESS_REQUESTS") == "true" {
+		maxChars := envInt("IXR_COMPRESS_MAX_CHARS", 0) // 0 → compressor.New's own default
+		if retrievalStore != nil {
+			retrievalTTL := time.Duration(envInt("IXR_COMPRESS_RETRIEVAL_TTL_SEC", 300)) * time.Second
+			interceptors = append(interceptors, compressor.NewReversible(maxChars, retrievalStore, retrievalTTL))
+		} else {
+			interceptors = append(interceptors, compressor.New(maxChars))
+		}
 	}
 
 	// Output-side brevity steering (opt-in): appends a terseness instruction
