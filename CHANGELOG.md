@@ -60,7 +60,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyway to show whether a viable candidate existed and was simply never
   tried. Observability only — does not change routing behavior.
 
+### Removed
+- `api/proto/ixr.proto`: an orphaned proto file defining an `IxrSchemaService`
+  gRPC service that was never implemented anywhere (no `google.golang.org/grpc`
+  server, no handler, no caller) and had already drifted into a second,
+  incompatible schema for the same types `schema/ixr.proto` publishes — same
+  domain, different field numbers, different `go_package`, disagreeing on
+  message shapes. Zero references anywhere except one stale doc comment.
+
 ### Fixed
+- The three published descriptions of ixr's public API — the live
+  `GET /v1/schema` JSON Schema, the checked-in `schema/ixr.schema.json`, and
+  `schema/ixr.proto` — had independently drifted from `pkg/schema` and from
+  each other with no CI check catching it: the live endpoint's `$defs` was
+  missing `CallEvent`, `TelemetryRecord`, `CostBreakdown`, `Identity`,
+  `ShadowMetadata`; the checked-in JSON Schema and proto were missing
+  `EmbeddingRequest`/`Response`, `ImageRequest`/`Response`, the audio
+  endpoint types, `Message.tool_call_id`/`name`, `Usage`'s cache-token
+  fields, and `CallEvent`'s `team_id`/`user_id`/`auto_routed`/`fallback_*`
+  fields — none of which is new; `pkg/schema` had simply moved on since
+  these were last touched. Refreshed both to match current `pkg/schema`
+  exactly, and added `internal/ingress/schema_endpoint_test.go`'s
+  `TestSchemaJSONMatchesCheckedInFile`, which fails CI the next time these
+  two drift apart instead of finding out via a confused external consumer.
 - `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
   and `availableCatalog` without importing/defining them, and called
   `ingress.NewMemoryHandler` code that had been silently dropped. Root
