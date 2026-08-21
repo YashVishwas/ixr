@@ -83,7 +83,7 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered model.
 |---|---|
 | **adaptive routing** | `model: "auto"` (or an `X-IXR-Intent` header) picks the model by live cost/latency/success-rate scoring, with epsilon-greedy/UCB bandits and shadow routing to test new models on real traffic without exposing them to callers |
 | **fallback + retry** | every call goes through retry-with-backoff and a fallback chain — a failing model doesn't fail the request, it escalates to the next-best one |
-| **circuit breaker** | per-model Closed → Open → HalfOpen state machine trips on sustained failure and sheds load before it cascades |
+| **resilience & load shedding** | four complementary, independently-configured layers: a per-model circuit breaker (Closed → Open → HalfOpen, always on, optionally shared across replicas via `IXR_CBSTATE_REDIS_ADDR`) trips on sustained *model* failure; a sliding-window rate limiter (always on, config-driven — unset quotas mean unlimited) enforces per-tenant request/token caps; admission control (`IXR_MAX_INFLIGHT`, off by default) caps aggregate concurrency regardless of which model is failing; a request body cap (`IXR_MAX_REQUEST_BODY_BYTES`, on by default at 10MB) rejects oversized payloads before they're decoded |
 | **response cache** | SHA-256 exact-match cache with LRU eviction + TTL — identical calls skip the provider entirely |
 | **cost tracking + budgets** | every response is priced against a real model pricing table; hierarchical org → team → user budget caps gate requests before they're sent |
 | **model chains** | a named chain (`fast-refine`, `debate`, ...) runs several models in sequence, each step's reply feeding the next — configured in `ixr.yaml`, no code |
@@ -93,7 +93,6 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full layered model.
 | **tool calling** | `Tool`/`ToolCall`/`ToolChoice` forwarded and parsed on every adapter |
 | **multimodal input** | image content alongside text, translated per-provider |
 | **auth** | API key, JWT, and mTLS, hot-reloadable without a restart |
-| **rate limiting** | sliding-window limiter, per-tenant request and token quotas |
 | **observability** | OpenTelemetry tracing, Prometheus metrics on `GET /metrics`, structured JSON-lines call log |
 | **multi-tenant identity** | every request resolves to a tenant/team/user, propagated through routing, budgets, and telemetry |
 

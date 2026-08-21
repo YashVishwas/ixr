@@ -60,6 +60,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyway to show whether a viable candidate existed and was simply never
   tried. Observability only — does not change routing behavior.
 
+### Changed
+- README's "what ixr does for every call" table listed the circuit breaker
+  and rate limiter as two unrelated rows among fourteen other features, with
+  admission control (`IXR_MAX_INFLIGHT`) and the request body cap
+  (`IXR_MAX_REQUEST_BODY_BYTES`) undocumented entirely — four resilience
+  layers that are actually complementary (model-level failure, aggregate
+  concurrency, per-tenant quota, payload size) read as unrelated sprawl, and
+  two of the four weren't discoverable at all without reading the source.
+  Consolidated into one "resilience & load shedding" row naming all four,
+  their env vars, and which are on by default vs. opt-in.
+
 ### Fixed
 - `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
   and `availableCatalog` without importing/defining them, and called
