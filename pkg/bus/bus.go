@@ -1,5 +1,9 @@
 // Package bus defines the event bus interface.
-// The in-memory implementation ships in phase 1; nats/kafka adapters are phase 2.
+// ixr ships two implementations: an in-memory bus for single-process delivery
+// and a webhook bus for fanning events out to external services. Additional
+// backends (Kafka, NATS, etc.) can implement this interface without touching
+// callers, but we don't carry unproven stub adapters for backends nobody has
+// asked for — add one when a real integration needs it.
 // Swapping implementations never changes code that publishes or subscribes.
 package bus
 
