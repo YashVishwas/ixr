@@ -61,6 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried. Observability only — does not change routing behavior.
 
 ### Fixed
+- Shadow routing (`X-IXR-Shadow-Model`) was wired to two independent,
+  disconnected implementations: `ingress.ChatHandler.runShadow` (the one
+  actually invoked per-request) published a `CallEvent` for the shadow
+  call but never touched the bandit, while `scoring.Orchestrator.RunShadow`
+  (the one meant to record shadow outcomes into `perfStore` and the shared
+  bandit for RFC Gap 12 exploration) was constructed and passed to
+  `ingress.WithShadow` but never called from anywhere. Net effect: shadow
+  traffic cost real provider spend but never improved auto-routing, the
+  entire point of running it. Extracted the reward/perf-recording logic
+  into `Orchestrator.Record` so both the internal `RunShadow` path and
+  `ChatHandler`'s per-request path call the same code, and `ChatHandler`
+  now calls it after every shadow response. `ingress.WithShadow` is only
+  passed when `IXR_AUTO_BANDIT=true` — feeding a bandit nothing else reads
+  isn't useful, so the header-triggered comparison call still fires and
+  logs a `CallEvent` regardless (unchanged), but only trains routing when
+  adaptive routing is actually turned on.
 - `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
   and `availableCatalog` without importing/defining them, and called
   `ingress.NewMemoryHandler` code that had been silently dropped. Root
