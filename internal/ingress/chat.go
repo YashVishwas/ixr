@@ -499,7 +499,9 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 	ev.Provider = sp.Name()
 
 	resp, err := sp.Chat(ctx, reasoning.AdjustTokenBudget(&shadowReq))
-	ev.Latency = schema.EventLatency(time.Since(start))
+	latency := time.Since(start)
+	ev.Latency = schema.EventLatency(latency)
+	var choices []schema.Choice
 	if err != nil {
 		ev.Error = err.Error()
 	} else {
@@ -508,8 +510,19 @@ func (h *ChatHandler) runShadow(r *http.Request, primaryID, primaryModel, shadow
 		ev.TokensOut = resp.Usage.CompletionTokens
 		ev.Response = *resp
 		ev.Cost = cost.ForUsage(shadowModel, resp.Usage)
+		choices = resp.Choices
 	}
 	_ = h.bus.Publish(ctx, ev)
+
+	// Feed the same learning path scoring.Orchestrator.RunShadow uses
+	// internally, so a shadow call informs bandit exploration exactly like a
+	// primary auto-routed call does via plugins/banditreward — the two were
+	// previously disconnected (h.shadow was wired but nothing ever called
+	// its RunShadow/Record path), so shadow traffic never actually improved
+	// routing despite paying for it.
+	if h.shadow != nil {
+		h.shadow.Record(ctx, shadowModel, err == nil, latency, choices)
+	}
 }
 
 // shouldRecordOutcome reports whether err should influence a model's circuit

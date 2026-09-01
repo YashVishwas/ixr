@@ -61,28 +61,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried. Observability only — does not change routing behavior.
 
 ### Removed
-- `api/proto/ixr.proto`: an orphaned proto file defining an `IxrSchemaService`
-  gRPC service that was never implemented anywhere (no `google.golang.org/grpc`
-  server, no handler, no caller) and had already drifted into a second,
-  incompatible schema for the same types `schema/ixr.proto` publishes — same
-  domain, different field numbers, different `go_package`, disagreeing on
-  message shapes. Zero references anywhere except one stale doc comment.
+- Kafka, Kinesis, NATS, and GCP Pub/Sub event-bus adapters
+  (`internal/adapters/bus/{kafka,kinesis,nats,pubsub}.go`). All four were
+  compile-safe stubs from the original phase-2 event-bus design (see
+  `docs/adr/0003-event-bus-shape.md`) whose `Publish` unconditionally
+  returned a "not connected" error — never wired into `pkg/ixr.Start`,
+  no config surface, no tests, no real integration behind any of them.
+  Carrying four dead integrations added review/maintenance surface with
+  no working feature behind it. The in-memory bus and the real,
+  functioning webhook bus (`bus.WebhookBus`) are unaffected; `pkg/bus.Bus`
+  is unchanged, so a real backend can still be added later without
+  touching callers.
 
 ### Fixed
-- The three published descriptions of ixr's public API — the live
-  `GET /v1/schema` JSON Schema, the checked-in `schema/ixr.schema.json`, and
-  `schema/ixr.proto` — had independently drifted from `pkg/schema` and from
-  each other with no CI check catching it: the live endpoint's `$defs` was
-  missing `CallEvent`, `TelemetryRecord`, `CostBreakdown`, `Identity`,
-  `ShadowMetadata`; the checked-in JSON Schema and proto were missing
-  `EmbeddingRequest`/`Response`, `ImageRequest`/`Response`, the audio
-  endpoint types, `Message.tool_call_id`/`name`, `Usage`'s cache-token
-  fields, and `CallEvent`'s `team_id`/`user_id`/`auto_routed`/`fallback_*`
-  fields — none of which is new; `pkg/schema` had simply moved on since
-  these were last touched. Refreshed both to match current `pkg/schema`
-  exactly, and added `internal/ingress/schema_endpoint_test.go`'s
-  `TestSchemaJSONMatchesCheckedInFile`, which fails CI the next time these
-  two drift apart instead of finding out via a confused external consumer.
+- Shadow routing (`X-IXR-Shadow-Model`) was wired to two independent,
+  disconnected implementations: `ingress.ChatHandler.runShadow` (the one
+  actually invoked per-request) published a `CallEvent` for the shadow
+  call but never touched the bandit, while `scoring.Orchestrator.RunShadow`
+  (the one meant to record shadow outcomes into `perfStore` and the shared
+  bandit for RFC Gap 12 exploration) was constructed and passed to
+  `ingress.WithShadow` but never called from anywhere. Net effect: shadow
+  traffic cost real provider spend but never improved auto-routing, the
+  entire point of running it. Extracted the reward/perf-recording logic
+  into `Orchestrator.Record` so both the internal `RunShadow` path and
+  `ChatHandler`'s per-request path call the same code, and `ChatHandler`
+  now calls it after every shadow response. `ingress.WithShadow` is only
+  passed when `IXR_AUTO_BANDIT=true` — feeding a bandit nothing else reads
+  isn't useful, so the header-triggered comparison call still fires and
+  logs a `CallEvent` regardless (unchanged), but only trains routing when
+  adaptive routing is actually turned on.
 - `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
   and `availableCatalog` without importing/defining them, and called
   `ingress.NewMemoryHandler` code that had been silently dropped. Root

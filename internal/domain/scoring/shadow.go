@@ -52,36 +52,45 @@ func (o *Orchestrator) RunShadow(bgCtx context.Context, req *schema.RequestEnvel
 			resp, err := p.Chat(bgCtx, shadowReq)
 			latency := time.Since(start)
 
-			success := err == nil
-			stats := store.ModelStats{
-				Model:        model,
-				Intent:       "",
-				SuccessRate:  floatBool(success),
-				P50LatencyMS: float64(latency.Milliseconds()),
-				P95LatencyMS: float64(latency.Milliseconds()),
+			var choices []schema.Choice
+			if resp != nil {
+				choices = resp.Choices
 			}
-			_ = o.perfStore.Upsert(bgCtx, stats)
-
-			if o.bandit != nil {
-				reward := floatBool(success) * 0.7
-				if latency < 2*time.Second {
-					reward += 0.3
-				}
-				// Quality bonus, kept in lockstep with
-				// plugins/banditreward's identical formula: both write into
-				// the same shared bandit instance (see pkg/ixr.Start), so
-				// letting one add a quality term the other doesn't would
-				// bias arm statistics between primary and shadow traffic
-				// for reasons having nothing to do with actual quality.
-				var choices []schema.Choice
-				if resp != nil {
-					choices = resp.Choices
-				}
-				reward += o.weights.Delta * QualityFromFinishReason(choices)
-				o.bandit.Update(model, reward)
-			}
+			o.Record(bgCtx, model, err == nil, latency, choices)
 		}()
 	}
+}
+
+// Record feeds one shadow-call outcome into perfStore and the bandit. It's
+// exposed separately from RunShadow so a caller that already runs its own
+// goroutine and needs to publish a CallEvent for the call (see
+// ingress.ChatHandler's header-triggered shadow path, which reports cost and
+// audit-log data RunShadow itself never had a reason to produce) can still
+// feed the one learning path RunShadow uses internally, instead of
+// duplicating the reward math and drifting out of sync with it.
+func (o *Orchestrator) Record(ctx context.Context, model string, success bool, latency time.Duration, choices []schema.Choice) {
+	stats := store.ModelStats{
+		Model:        model,
+		SuccessRate:  floatBool(success),
+		P50LatencyMS: float64(latency.Milliseconds()),
+		P95LatencyMS: float64(latency.Milliseconds()),
+	}
+	_ = o.perfStore.Upsert(ctx, stats)
+
+	if o.bandit == nil {
+		return
+	}
+	reward := floatBool(success) * 0.7
+	if latency < 2*time.Second {
+		reward += 0.3
+	}
+	// Quality bonus, kept in lockstep with plugins/banditreward's identical
+	// formula: both write into the same shared bandit instance (see
+	// pkg/ixr.Start), so letting one add a quality term the other doesn't
+	// would bias arm statistics between primary and shadow traffic for
+	// reasons having nothing to do with actual quality.
+	reward += o.weights.Delta * QualityFromFinishReason(choices)
+	o.bandit.Update(model, reward)
 }
 
 func deepCopyReq(req *schema.RequestEnvelope) *schema.RequestEnvelope {
