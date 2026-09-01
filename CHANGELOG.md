@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyway to show whether a viable candidate existed and was simply never
   tried. Observability only — does not change routing behavior.
 
+### Removed
+- Kafka, Kinesis, NATS, and GCP Pub/Sub event-bus adapters
+  (`internal/adapters/bus/{kafka,kinesis,nats,pubsub}.go`). All four were
+  compile-safe stubs from the original phase-2 event-bus design (see
+  `docs/adr/0003-event-bus-shape.md`) whose `Publish` unconditionally
+  returned a "not connected" error — never wired into `pkg/ixr.Start`,
+  no config surface, no tests, no real integration behind any of them.
+  Carrying four dead integrations added review/maintenance surface with
+  no working feature behind it. The in-memory bus and the real,
+  functioning webhook bus (`bus.WebhookBus`) are unaffected; `pkg/bus.Bus`
+  is unchanged, so a real backend can still be added later without
+  touching callers.
+
 ### Fixed
 - `main` did not compile at all: `pkg/ixr/ixr.go` referenced `plugins/compressor`
   and `availableCatalog` without importing/defining them, and called
