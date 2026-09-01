@@ -2,17 +2,46 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/YashVishwas/ixr/schema/ixr.schema.json",
   "title": "ixr Schema v1",
-  "description": "JSON Schema definitions for ixr event bus and API types. Go (pkg/schema/) is the source of truth; this file is a derived artifact.",
+  "description": "JSON Schema definitions for ixr event bus and API types. Go (pkg/schema/) is the source of truth; this file is a derived artifact kept in sync by internal/ingress/schema_test.go against the live GET /v1/schema response.",
   "$defs": {
+
+    "ContentPart": {
+      "type": "object",
+      "description": "One block of a multi-part message (text + images).",
+      "required": ["type"],
+      "properties": {
+        "type":      { "type": "string", "enum": ["text", "image_url"] },
+        "text":      { "type": "string" },
+        "image_url": { "$ref": "#/$defs/ImageURLPart" }
+      }
+    },
+
+    "ImageURLPart": {
+      "type": "object",
+      "description": "An image reference: an https:// URL, or a data: URI carrying inline base64 image bytes.",
+      "required": ["url"],
+      "properties": {
+        "url":    { "type": "string" },
+        "detail": { "type": "string", "enum": ["auto", "low", "high"] }
+      }
+    },
 
     "Message": {
       "type": "object",
       "description": "A single turn in a conversation.",
       "required": ["role"],
       "properties": {
-        "role":       { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
-        "content":    { "type": "string" },
-        "tool_calls": { "type": "array", "items": { "$ref": "#/$defs/ToolCall" } }
+        "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+        "content": {
+          "description": "Plain text, or an array of content parts for multimodal messages.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "$ref": "#/$defs/ContentPart" } }
+          ]
+        },
+        "tool_calls":   { "type": "array", "items": { "$ref": "#/$defs/ToolCall" } },
+        "tool_call_id": { "type": "string", "description": "Set on role=\"tool\" messages; identifies which ToolCall this responds to." },
+        "name":         { "type": "string", "description": "Optional function name on role=\"tool\" messages." }
       }
     },
 
@@ -62,7 +91,7 @@
       "description": "ixr's canonical inbound chat request. Mirrors the OpenAI /v1/chat/completions request body.",
       "required": ["model", "messages"],
       "properties": {
-        "model":       { "type": "string" },
+        "model":       { "type": "string", "description": "Model name or 'auto'" },
         "messages":    { "type": "array", "items": { "$ref": "#/$defs/Message" }, "minItems": 1 },
         "stream":      { "type": "boolean", "default": false },
         "tools":       { "type": "array", "items": { "$ref": "#/$defs/Tool" } },
@@ -117,7 +146,15 @@
       "properties": {
         "prompt_tokens":     { "type": "integer" },
         "completion_tokens": { "type": "integer" },
-        "total_tokens":      { "type": "integer" }
+        "total_tokens":      { "type": "integer" },
+        "cache_read_input_tokens": {
+          "type": "integer",
+          "description": "Anthropic-style prompt-cache read tokens, included in prompt_tokens (not additional). 0 when unsupported or unused."
+        },
+        "cache_creation_input_tokens": {
+          "type": "integer",
+          "description": "Anthropic-style prompt-cache write tokens, included in prompt_tokens (not additional). 0 when unsupported or unused."
+        }
       }
     },
 
@@ -132,6 +169,124 @@
         "model":   { "type": "string" },
         "choices": { "type": "array", "items": { "$ref": "#/$defs/Choice" } },
         "usage":   { "$ref": "#/$defs/Usage" }
+      }
+    },
+
+    "EmbeddingRequest": {
+      "type": "object",
+      "description": "Canonical form of a POST /v1/embeddings body.",
+      "required": ["model", "input"],
+      "properties": {
+        "model": { "type": "string" },
+        "input": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "encoding_format": { "type": "string", "enum": ["float", "base64"] },
+        "dimensions":      { "type": "integer" },
+        "user":            { "type": "string" }
+      }
+    },
+
+    "EmbeddingObject": {
+      "type": "object",
+      "required": ["object", "index", "embedding"],
+      "properties": {
+        "object":    { "type": "string", "enum": ["embedding"] },
+        "index":     { "type": "integer" },
+        "embedding": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+
+    "EmbeddingUsage": {
+      "type": "object",
+      "required": ["prompt_tokens", "total_tokens"],
+      "properties": {
+        "prompt_tokens": { "type": "integer" },
+        "total_tokens":  { "type": "integer" }
+      }
+    },
+
+    "EmbeddingResponse": {
+      "type": "object",
+      "description": "Canonical form of a /v1/embeddings response.",
+      "required": ["object", "data", "model", "usage"],
+      "properties": {
+        "object": { "type": "string", "enum": ["list"] },
+        "data":   { "type": "array", "items": { "$ref": "#/$defs/EmbeddingObject" } },
+        "model":  { "type": "string" },
+        "usage":  { "$ref": "#/$defs/EmbeddingUsage" }
+      }
+    },
+
+    "ImageRequest": {
+      "type": "object",
+      "description": "Canonical form of a POST /v1/images/generations body.",
+      "required": ["model", "prompt"],
+      "properties": {
+        "model":           { "type": "string" },
+        "prompt":          { "type": "string" },
+        "n":               { "type": "integer", "description": "Number of images (default 1)." },
+        "size":            { "type": "string", "description": "e.g. \"1024x1024\"." },
+        "quality":         { "type": "string", "enum": ["standard", "hd"] },
+        "style":           { "type": "string", "enum": ["vivid", "natural"] },
+        "response_format": { "type": "string", "enum": ["url", "b64_json"] },
+        "user":            { "type": "string" }
+      }
+    },
+
+    "ImageData": {
+      "type": "object",
+      "properties": {
+        "url":            { "type": "string" },
+        "b64_json":       { "type": "string" },
+        "revised_prompt": { "type": "string" }
+      }
+    },
+
+    "ImageResponse": {
+      "type": "object",
+      "description": "Canonical form of a /v1/images/generations response.",
+      "required": ["created", "data"],
+      "properties": {
+        "created": { "type": "integer" },
+        "data":    { "type": "array", "items": { "$ref": "#/$defs/ImageData" } }
+      }
+    },
+
+    "AudioSpeechRequest": {
+      "type": "object",
+      "description": "Canonical form of a POST /v1/audio/speech body.",
+      "required": ["model", "input", "voice"],
+      "properties": {
+        "model":           { "type": "string" },
+        "input":           { "type": "string" },
+        "voice":           { "type": "string", "enum": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] },
+        "response_format": { "type": "string", "enum": ["mp3", "opus", "aac", "flac", "wav", "pcm"] },
+        "speed":           { "type": "number", "minimum": 0.25, "maximum": 4.0 }
+      }
+    },
+
+    "TranscriptionRequest": {
+      "type": "object",
+      "description": "Canonical form of a POST /v1/audio/transcriptions body. The audio file itself is sent as multipart form-data (field \"file\"), so it has no representation here.",
+      "required": ["model"],
+      "properties": {
+        "model":           { "type": "string" },
+        "language":        { "type": "string" },
+        "prompt":          { "type": "string" },
+        "temperature":     { "type": "number" },
+        "response_format": { "type": "string", "enum": ["json", "text", "srt", "verbose_json", "vtt"] }
+      }
+    },
+
+    "TranscriptionResponse": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" }
       }
     },
 
@@ -173,21 +328,26 @@
       "description": "Emitted on the ixr event bus for every LLM call. Primary unit of data for plugins and downstream systems.",
       "required": ["id", "timestamp", "tenant_id", "provider", "model"],
       "properties": {
-        "id":          { "type": "string" },
-        "timestamp":   { "type": "string", "format": "date-time" },
-        "use_case_id": { "type": "string" },
-        "tenant_id":   { "type": "string" },
-        "provider":    { "type": "string", "description": "Normalised provider name (openai, anthropic, vertex_ai, mistral_ai, ollama, deepseek)." },
-        "model":       { "type": "string" },
-        "latency_ms":  { "type": "integer", "description": "Provider round-trip in milliseconds." },
-        "tokens_in":   { "type": "integer" },
-        "tokens_out":  { "type": "integer" },
-        "cost":        { "$ref": "#/$defs/CostBreakdown" },
-        "request":     { "$ref": "#/$defs/RequestEnvelope" },
-        "response":    { "$ref": "#/$defs/ResponseEnvelope" },
-        "error":       { "type": "string", "description": "Non-empty when the provider call failed." },
-        "streaming":   { "type": "boolean" },
-        "shadow":      { "$ref": "#/$defs/ShadowMetadata" }
+        "id":           { "type": "string" },
+        "timestamp":    { "type": "string", "format": "date-time" },
+        "use_case_id":  { "type": "string" },
+        "tenant_id":    { "type": "string" },
+        "team_id":      { "type": "string" },
+        "user_id":      { "type": "string" },
+        "provider":     { "type": "string", "description": "Normalised provider name (openai, anthropic, vertex_ai, mistral_ai, ollama, deepseek)." },
+        "model":        { "type": "string" },
+        "latency_ms":   { "type": "integer", "description": "Provider round-trip in milliseconds." },
+        "tokens_in":    { "type": "integer" },
+        "tokens_out":   { "type": "integer" },
+        "cost":         { "$ref": "#/$defs/CostBreakdown" },
+        "request":      { "$ref": "#/$defs/RequestEnvelope" },
+        "response":     { "$ref": "#/$defs/ResponseEnvelope" },
+        "error":        { "type": "string", "description": "Non-empty when the provider call failed." },
+        "streaming":    { "type": "boolean" },
+        "shadow":       { "$ref": "#/$defs/ShadowMetadata" },
+        "auto_routed":  { "type": "boolean", "description": "True when the call arrived via model:\"auto\"." },
+        "fallback_used": { "type": "boolean", "description": "True when a fallback model served the call after fallback_from failed." },
+        "fallback_from": { "type": "string" }
       }
     },
 

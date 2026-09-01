@@ -2,8 +2,10 @@
 // Version: v1
 //
 // Go is the source of truth (pkg/schema/). This file is a derived artifact
-// kept in sync with the Go types. Do NOT add runtime proto dependencies to the
-// ixr binary — this file is for consumer language SDK generation only.
+// kept in sync with the Go types — see internal/ingress/schema_test.go, which
+// fails CI if this drifts from the live GET /v1/schema JSON Schema. Do NOT
+// add runtime proto dependencies to the ixr binary — this file is for
+// consumer language SDK generation only.
 //
 // Usage (Python):
 //   pip install grpcio-tools
@@ -27,11 +29,31 @@ import "google/protobuf/struct.proto";
 // Core request / response types
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Message is a single turn in a conversation.
+// ContentPart is one block of a multi-part message (text + images).
+message ContentPart {
+  string type = 1; // "text" | "image_url"
+  string text = 2;
+  ImageURLPart image_url = 3;
+}
+
+// ImageURLPart is an image reference: an https:// URL, or a data: URI
+// carrying inline base64 image bytes.
+message ImageURLPart {
+  string url    = 1;
+  string detail = 2; // "auto" | "low" | "high"
+}
+
+// Message is a single turn in a conversation. content is either a plain
+// string or, for multimodal turns, an array of ContentPart — encoded here as
+// google.protobuf.Value since proto3 has no native union type; see
+// pkg/schema/content.go's MarshalJSON/UnmarshalJSON for the wire shape this
+// mirrors.
 message Message {
-  string role    = 1; // "user" | "assistant" | "system" | "tool"
-  string content = 2;
+  string role                 = 1; // "system" | "user" | "assistant" | "tool"
+  google.protobuf.Value content = 2; // string | ContentPart[]
   repeated ToolCall tool_calls = 3;
+  string tool_call_id         = 4; // set on role="tool" messages; identifies which ToolCall this responds to
+  string name                 = 5; // optional function name on role="tool" messages
 }
 
 // Tool describes a callable function the model may invoke.
@@ -92,6 +114,12 @@ message Usage {
   int32 prompt_tokens     = 1;
   int32 completion_tokens = 2;
   int32 total_tokens      = 3;
+  // cache_read_input_tokens and cache_creation_input_tokens report
+  // Anthropic-style prompt-caching activity (0 for providers that don't
+  // support it). prompt_tokens already includes these — they're a
+  // breakdown, not additional tokens.
+  int32 cache_read_input_tokens     = 4;
+  int32 cache_creation_input_tokens = 5;
 }
 
 // ResponseEnvelope is ixr's canonical chat response.
@@ -103,6 +131,99 @@ message ResponseEnvelope {
   string           model   = 4;
   repeated Choice  choices = 5;
   Usage            usage   = 6;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Embeddings
+// ─────────────────────────────────────────────────────────────────────────────
+
+// EmbeddingRequest is the canonical form of a POST /v1/embeddings body.
+message EmbeddingRequest {
+  string input_string          = 1; // input: string variant
+  repeated string input_array  = 2; // input: []string variant
+  string model                 = 3;
+  string encoding_format       = 4; // "float" | "base64"
+  int32  dimensions            = 5;
+  string user                  = 6;
+}
+
+// EmbeddingObject is one embedding in the response.
+message EmbeddingObject {
+  string object          = 1; // "embedding"
+  int32  index           = 2;
+  repeated float embedding = 3;
+}
+
+// EmbeddingUsage reports token consumption for an embedding call.
+message EmbeddingUsage {
+  int32 prompt_tokens = 1;
+  int32 total_tokens  = 2;
+}
+
+// EmbeddingResponse is the canonical form of a /v1/embeddings response.
+message EmbeddingResponse {
+  string object                   = 1; // "list"
+  repeated EmbeddingObject data    = 2;
+  string model                    = 3;
+  EmbeddingUsage usage             = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Images
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ImageRequest is the canonical form of a POST /v1/images/generations body.
+message ImageRequest {
+  string model           = 1;
+  string prompt          = 2;
+  int32  n               = 3; // number of images (default 1)
+  string size            = 4; // "1024x1024"
+  string quality         = 5; // "standard" | "hd"
+  string style           = 6; // "vivid" | "natural"
+  string response_format = 7; // "url" | "b64_json"
+  string user            = 8;
+}
+
+// ImageData holds one generated image.
+message ImageData {
+  string url            = 1;
+  string b64_json       = 2;
+  string revised_prompt = 3;
+}
+
+// ImageResponse is the canonical form of a /v1/images/generations response.
+message ImageResponse {
+  int64 created            = 1;
+  repeated ImageData data  = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio
+// ─────────────────────────────────────────────────────────────────────────────
+
+// AudioSpeechRequest is the canonical form of a POST /v1/audio/speech body.
+message AudioSpeechRequest {
+  string model           = 1;
+  string input           = 2;
+  string voice           = 3; // alloy | echo | fable | onyx | nova | shimmer
+  string response_format = 4; // mp3 | opus | aac | flac | wav | pcm
+  double speed           = 5; // 0.25–4.0
+}
+
+// TranscriptionRequest is the canonical form of a POST /v1/audio/transcriptions
+// body. The audio file itself is sent as multipart form-data (field "file"),
+// so it has no representation here.
+message TranscriptionRequest {
+  string model           = 1;
+  string language        = 2;
+  string prompt          = 3;
+  double temperature     = 4;
+  string response_format = 5; // json | text | srt | verbose_json | vtt
+}
+
+// TranscriptionResponse is the canonical form of a /v1/audio/transcriptions response.
+message TranscriptionResponse {
+  string text = 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,23 +267,34 @@ message ShadowMetadata {
 //
 // JSON equivalent is emitted by the audit-log plugin (one line per call).
 message CallEvent {
-  string                    id         = 1;
-  google.protobuf.Timestamp timestamp  = 2;
-  string                    use_case_id = 3;
-  string                    tenant_id  = 4;
-  string                    provider   = 5;
-  string                    model      = 6;
+  string                    id           = 1;
+  google.protobuf.Timestamp timestamp    = 2;
+  string                    use_case_id  = 3;
+  string                    tenant_id    = 4;
+  string                    team_id      = 5;
+  string                    user_id      = 6;
+  string                    provider     = 7;
+  string                    model        = 8;
   // latency_ms is the provider round-trip time in milliseconds.
-  int64                     latency_ms = 7;
-  int32                     tokens_in  = 8;
-  int32                     tokens_out = 9;
-  CostBreakdown             cost       = 10;
-  RequestEnvelope           request    = 11;
-  ResponseEnvelope          response   = 12;
+  int64                     latency_ms   = 9;
+  int32                     tokens_in    = 10;
+  int32                     tokens_out   = 11;
+  CostBreakdown             cost         = 12;
+  RequestEnvelope           request      = 13;
+  ResponseEnvelope          response     = 14;
   // error is non-empty when the provider call failed.
-  string                    error      = 13;
-  bool                      streaming  = 14;
-  ShadowMetadata            shadow     = 15;
+  string                    error        = 15;
+  bool                      streaming    = 16;
+  ShadowMetadata            shadow       = 17;
+  // auto_routed marks a call that arrived via model:"auto" — only these
+  // train the bandit reward plugin (RFC Gap 12); a caller who named a model
+  // explicitly didn't opt into exploration.
+  bool                      auto_routed  = 18;
+  // fallback_used reports whether the call was served by a fallback model
+  // after the originally-requested model (fallback_from) failed — e.g. via
+  // context-window escalation. Both are zero-value on the common path.
+  bool                      fallback_used = 19;
+  string                    fallback_from = 20;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
