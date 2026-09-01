@@ -214,7 +214,8 @@ func Start(opts ...Option) error {
 	// the same bandit instance as shadow routing above, so exploration and
 	// reward from both paths reinforce one set of arm statistics.
 	var feedbackStore *domainfeedback.Store
-	if os.Getenv("IXR_AUTO_BANDIT") == "true" {
+	autoBanditEnabled := os.Getenv("IXR_AUTO_BANDIT") == "true"
+	if autoBanditEnabled {
 		scoringEngine.SetBandit(bandit)
 		mgr.Register(banditreward.New(bandit))
 
@@ -304,16 +305,24 @@ func Start(opts ...Option) error {
 	}
 
 	// --- Chat handler ---
-	chatHandler := ingress.NewChatHandler(
-		router,
-		memBus,
+	chatOpts := []ingress.ChatOption{
 		ingress.WithEngine(scoringEngine),
 		ingress.WithCBRegistry(cbRegistry),
-		ingress.WithShadow(shadowOrch),
 		ingress.WithMetrics(metrics),
 		ingress.WithChains(chainRegistry),
 		ingress.WithRetrieval(retrievalStore),
-	)
+	}
+	// Wiring shadowOrch only feeds its outcome back into the shared bandit
+	// (see shadow.go's Record) — with no bandit-based routing enabled, that
+	// bandit's arm statistics are never read by anything, so there's nothing
+	// for a shadow call to usefully inform. The X-IXR-Shadow-Model header
+	// itself still triggers a background comparison call and a logged
+	// CallEvent regardless of this flag (see chat.go's runShadow) — this
+	// only governs whether that comparison also trains auto-routing.
+	if autoBanditEnabled {
+		chatOpts = append(chatOpts, ingress.WithShadow(shadowOrch))
+	}
+	chatHandler := ingress.NewChatHandler(router, memBus, chatOpts...)
 
 	// --- Rate limiter ---
 	var rl policy.RateLimiter
